@@ -104,25 +104,6 @@ async function ensurePersonalRoleBinding(userId: string) {
   });
 }
 
-async function inferInitialContext(userId: string): Promise<AccessContext> {
-  const contexts = await listUserContexts(userId);
-  const orgContext = contexts.find(
-    (context) => context.type === ScopeType.ORGANIZATION,
-  );
-
-  if (orgContext) {
-    return {
-      type: ScopeType.ORGANIZATION,
-      id: orgContext.id,
-    };
-  }
-
-  return {
-    type: ScopeType.PERSONAL,
-    id: userId,
-  };
-}
-
 async function persistActiveContext(context: AccessContext) {
   await auth.api.updateSession({
     headers: await authHeaders(),
@@ -133,10 +114,18 @@ async function persistActiveContext(context: AccessContext) {
   });
 }
 
-async function bootstrapSessionContext(userId: string): Promise<AccessContext> {
-  const nextContext = await inferInitialContext(userId);
-  await persistActiveContext(nextContext);
-  return nextContext;
+function resolveAuthUserId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const maybeUser = (payload as { user?: { id?: unknown } }).user;
+
+  if (!maybeUser || typeof maybeUser !== "object") {
+    return null;
+  }
+
+  return typeof maybeUser.id === "string" ? maybeUser.id : null;
 }
 
 export async function signInAction(
@@ -155,29 +144,23 @@ export async function signInAction(
   }
 
   try {
-    await auth.api.signInEmail({
+    const signInResult = await auth.api.signInEmail({
       headers: await authHeaders(),
       body: {
         email: parsed.data.email,
         password: parsed.data.password,
       },
     });
+    const userId = resolveAuthUserId(signInResult);
 
-    const session = await getServerSessionOrNull();
-    if (!session) {
+    if (!userId) {
       return {
         error: "Unable to establish session. Please try again.",
       };
     }
 
-    await ensurePersonalRoleBinding(session.user.id);
-    const context = await bootstrapSessionContext(session.user.id);
-
-    if (context.type === ScopeType.ORGANIZATION) {
-      redirect("/organizer/dashboard");
-    }
-
-    redirect("/onboarding");
+    await ensurePersonalRoleBinding(userId);
+    redirect("/attendee/dashboard");
   } catch (error) {
     return actionError(error);
   }
@@ -200,25 +183,20 @@ export async function signUpAction(
   }
 
   try {
-    await auth.api.signUpEmail({
+    const signUpResult = await auth.api.signUpEmail({
       headers: await authHeaders(),
       body: parsed.data,
     });
+    const userId = resolveAuthUserId(signUpResult);
 
-    const session = await getServerSessionOrNull();
-    if (!session) {
+    if (!userId) {
       return {
         error: "Unable to establish session. Please try again.",
       };
     }
 
-    await ensurePersonalRoleBinding(session.user.id);
-    await persistActiveContext({
-      type: ScopeType.PERSONAL,
-      id: session.user.id,
-    });
-
-    redirect("/onboarding");
+    await ensurePersonalRoleBinding(userId);
+    redirect("/attendee/dashboard");
   } catch (error) {
     return actionError(error);
   }

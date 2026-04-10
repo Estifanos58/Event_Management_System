@@ -1,6 +1,33 @@
 import Link from "next/link";
+import { ScopeType } from "@prisma/client";
+import { getServerSessionOrNull, resolveActiveContext } from "@/core/auth/session";
 
-export default function PublicLayout({ children }: { children: React.ReactNode }) {
+function getDashboardHref(session: NonNullable<Awaited<ReturnType<typeof getServerSessionOrNull>>>) {
+  const context = resolveActiveContext(session, session.user.id);
+
+  if (!context) {
+    return "/attendee/dashboard";
+  }
+
+  if (context.type === ScopeType.PLATFORM) {
+    return "/admin/dashboard";
+  }
+
+  if (context.type === ScopeType.ORGANIZATION) {
+    return "/organizer/dashboard";
+  }
+
+  if (context.type === ScopeType.EVENT) {
+    return "/staff/dashboard";
+  }
+
+  return "/attendee/dashboard";
+}
+
+export default async function PublicLayout({ children }: { children: React.ReactNode }) {
+  const session = await getServerSessionOrNull().catch(() => null);
+  const dashboardHref = session ? getDashboardHref(session) : "/login";
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
       <header className="border-b border-gray-200 bg-white">
@@ -34,10 +61,10 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
               Contact
             </Link>
             <Link
-              href="/login"
+              href={dashboardHref}
               className="ml-1 rounded-xl bg-orange-500 px-4 py-2 font-semibold text-white transition-colors hover:bg-orange-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
             >
-              Login
+              {session ? "Dashboard" : "Login"}
             </Link>
           </nav>
         </div>

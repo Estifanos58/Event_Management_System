@@ -10,42 +10,59 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { listDiscoverableEvents } from "@/domains/discovery/service";
 
-export default function HomePage() {
+const FALLBACK_EVENT_COVER =
+  "https://images.unsplash.com/photo-1511578314322-379afb476865?w=1200&auto=format&fit=crop&q=70";
+
+export const dynamic = "force-dynamic";
+
+function formatEventSchedule(startAtIso: string) {
+  const startAt = new Date(startAtIso);
+
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(startAt);
+}
+
+function formatEventLocation(input: {
+  venueMode: "PHYSICAL" | "VIRTUAL" | "HYBRID";
+  venueName: string | null;
+  venueAddress: string | null;
+  region: string;
+}) {
+  if (input.venueMode === "VIRTUAL") {
+    return `Virtual · ${input.region}`;
+  }
+
+  if (input.venueName && input.venueAddress) {
+    return `${input.venueName} · ${input.venueAddress}`;
+  }
+
+  if (input.venueName) {
+    return input.venueName;
+  }
+
+  if (input.venueAddress) {
+    return input.venueAddress;
+  }
+
+  return input.region;
+}
+
+export default async function HomePage() {
   const categories = ["All", "Tech", "Music", "Design", "Business", "Health", "Sports", "Arts"];
-
-  const featuredEvents = [
-    {
-      id: "event-1",
-      title: "Future of Tech Conference",
-      location: "San Francisco, CA",
-      schedule: "THU, OCT 24 • 7:00 PM",
-      image:
-        "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=1200&auto=format&fit=crop&q=70",
-      description:
-        "Join industry leaders for an evening of networking, keynotes, and product showcases.",
-    },
-    {
-      id: "event-2",
-      title: "City Sound Festival",
-      location: "Austin, TX",
-      schedule: "SAT, NOV 02 • 5:30 PM",
-      image:
-        "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=1200&auto=format&fit=crop&q=70",
-      description:
-        "A full-day music experience featuring emerging artists, local food, and premium lounges.",
-    },
-    {
-      id: "event-3",
-      title: "Design Systems Summit",
-      location: "Remote + Addis Ababa",
-      schedule: "TUE, DEC 10 • 9:00 AM",
-      image:
-        "https://images.unsplash.com/photo-1515169067868-5387ec356754?w=1200&auto=format&fit=crop&q=70",
-      description:
-        "Learn practical design system strategies from product teams building modern SaaS platforms.",
-    },
-  ];
+  const featuredEvents = await listDiscoverableEvents({
+    page: "1",
+    pageSize: "3",
+    sort: "popularity",
+  })
+    .then((result) => result.items)
+    .catch(() => []);
 
   return (
     <main className="min-h-screen bg-gray-50">
@@ -60,23 +77,30 @@ export default function HomePage() {
             Explore unforgettable experiences, connect with communities, and create your next memory.
           </p>
 
-          <div className="mx-auto mt-10 flex max-w-3xl flex-col gap-3 rounded-2xl bg-white p-3 shadow-xl sm:flex-row sm:items-center">
+          <form
+            action="/discover"
+            method="get"
+            className="mx-auto mt-10 flex max-w-3xl flex-col gap-3 rounded-2xl bg-white p-3 shadow-xl sm:flex-row sm:items-center"
+          >
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-400" />
               <Input
                 type="text"
+                name="q"
                 placeholder="Search events, venues, or organizers..."
                 className="border-none bg-transparent pl-11 shadow-none focus-visible:ring-0"
               />
             </div>
-            <Button className="bg-orange-500 hover:bg-orange-600">Browse events</Button>
+            <Button type="submit" className="bg-orange-500 hover:bg-orange-600">
+              Browse events
+            </Button>
             <Link
               href="/register"
               className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-gray-100 px-4 text-sm font-semibold text-gray-900 transition-colors hover:bg-gray-200"
             >
               Create event <ArrowRight className="h-4 w-4" />
             </Link>
-          </div>
+          </form>
         </div>
       </header>
 
@@ -105,28 +129,52 @@ export default function HomePage() {
           </div>
 
           <div className="mt-6 grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-            {featuredEvents.map((event) => (
-              <Card key={event.id} className="overflow-hidden">
-                <div className="aspect-16/10 overflow-hidden bg-gray-100">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={event.image}
-                    alt={event.title}
-                    className="h-full w-full object-cover transition-transform duration-300 hover:scale-105"
-                  />
-                </div>
-                <CardContent className="space-y-3">
-                  <p className="flex items-center gap-2 text-xs font-semibold text-orange-500">
-                    <Calendar className="h-4 w-4" /> {event.schedule}
-                  </p>
-                  <h3 className="text-lg font-bold text-gray-900">{event.title}</h3>
-                  <p className="text-sm text-gray-500">{event.description}</p>
-                  <p className="flex items-center gap-2 text-sm text-gray-500">
-                    <MapPin className="h-4 w-4" /> {event.location}
+            {featuredEvents.length === 0 ? (
+              <Card className="xl:col-span-3">
+                <CardContent className="py-12 text-center">
+                  <p className="text-sm text-gray-500">
+                    No featured events are available right now. Check back soon.
                   </p>
                 </CardContent>
               </Card>
-            ))}
+            ) : (
+              featuredEvents.map((event) => (
+                <Card key={event.id} className="overflow-hidden">
+                  <div className="aspect-16/10 overflow-hidden bg-gray-100">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={event.coverImageUrl ?? FALLBACK_EVENT_COVER}
+                      alt={event.title}
+                      className="h-full w-full object-cover transition-transform duration-300 hover:scale-105"
+                    />
+                  </div>
+                  <CardContent className="space-y-3">
+                    <p className="flex items-center gap-2 text-xs font-semibold text-orange-500">
+                      <Calendar className="h-4 w-4" /> {formatEventSchedule(event.startAt)}
+                    </p>
+                    <h3 className="text-lg font-bold text-gray-900">{event.title}</h3>
+                    <p className="line-clamp-3 text-sm text-gray-500">
+                      {event.description ?? "No description available yet."}
+                    </p>
+                    <p className="flex items-center gap-2 text-sm text-gray-500">
+                      <MapPin className="h-4 w-4" />
+                      {formatEventLocation({
+                        venueMode: event.venueMode,
+                        venueName: event.venueName,
+                        venueAddress: event.venueAddress,
+                        region: event.organizer.region,
+                      })}
+                    </p>
+                    <Link
+                      href={`/discover/${event.id}`}
+                      className="inline-flex items-center gap-2 text-sm font-semibold text-orange-500 hover:text-orange-600"
+                    >
+                      View event <ArrowRight className="h-4 w-4" />
+                    </Link>
+                  </CardContent>
+                </Card>
+              ))
+            )}
           </div>
         </section>
 

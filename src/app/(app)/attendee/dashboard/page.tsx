@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ScopeType } from "@prisma/client";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { prisma } from "@/core/db/prisma";
 import { listDiscoverableEvents } from "@/domains/discovery/service";
@@ -40,6 +41,25 @@ export default async function AttendeeDashboardPage() {
   const snapshot = await requireDashboardSnapshot();
   const userId = snapshot.session.user.id;
   const now = new Date();
+  const organizationContexts = snapshot.contexts.filter(
+    (context) => context.type === ScopeType.ORGANIZATION,
+  );
+
+  const organizationAction =
+    organizationContexts.length === 0
+      ? {
+          href: "/onboarding",
+          label: "Create organization",
+        }
+      : organizationContexts.length === 1
+        ? {
+            href: "/organizer/dashboard",
+            label: organizationContexts[0].label,
+          }
+        : {
+            href: "/context",
+            label: "Organizations",
+          };
 
   const [ticketCount, activeReservations, pendingOrders, upcomingTickets, notifications, discover] =
     (await Promise.all([
@@ -118,11 +138,20 @@ export default async function AttendeeDashboardPage() {
 
   return (
     <div className="space-y-8">
-      <header>
-        <h1 className="text-3xl font-extrabold tracking-tight text-gray-900">Your Overview</h1>
-        <p className="mt-2 text-sm text-gray-500">
-          Everything you need to keep track of your upcoming experiences.
-        </p>
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-extrabold tracking-tight text-gray-900">Your Overview</h1>
+          <p className="mt-2 text-sm text-gray-500">
+            Everything you need to keep track of your upcoming experiences.
+          </p>
+        </div>
+
+        <Link
+          href={organizationAction.href}
+          className="inline-flex h-11 items-center justify-center rounded-xl bg-orange-500 px-4 text-sm font-semibold text-white transition-colors hover:bg-orange-600"
+        >
+          {organizationAction.label}
+        </Link>
       </header>
 
       <main className="space-y-8">
