@@ -1,0 +1,2 @@
+-- RenameIndex
+ALTER INDEX "PolicyAcceptance_userId_documentType_documentVersion_scopeType_" RENAME TO "PolicyAcceptance_userId_documentType_documentVersion_scopeT_key";

@@ -1,0 +1,1122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ORGANIZER
+  STAFF
+  ATTENDEE
+}
+
+enum ScopeType {
+  PLATFORM
+  ORGANIZATION
+  EVENT
+  PERSONAL
+}
+
+enum KycStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum EventStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  PUBLISHED
+  LIVE
+  COMPLETED
+  ARCHIVED
+  CANCELLED
+  POSTPONED
+}
+
+enum EventVisibility {
+  PUBLIC
+  UNLISTED
+  PRIVATE
+}
+
+enum VenueMode {
+  PHYSICAL
+  VIRTUAL
+  HYBRID
+}
+
+enum RegistrationType {
+  OPEN
+  APPROVAL_REQUIRED
+  APPLICATION_BASED
+}
+
+enum EventSessionStatus {
+  SCHEDULED
+  CANCELLED
+  COMPLETED
+}
+
+enum TicketType {
+  FREE
+  PAID
+  VIP
+}
+
+enum TicketReleaseStrategy {
+  STANDARD
+  EARLY_BIRD
+  PHASED
+  DYNAMIC
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  EXPIRED
+  CANCELLED
+}
+
+enum WaitlistStatus {
+  WAITING
+  NOTIFIED
+  CLAIMED
+  EXPIRED
+  REMOVED
+}
+
+enum OrderStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PaymentAttemptStatus {
+  INITIATED
+  PROCESSING
+  REQUIRES_ACTION
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  VOIDED
+  REFUNDED
+}
+
+enum RefundStatus {
+  REQUESTED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum TicketStatus {
+  VALID
+  USED
+  CANCELLED
+  REFUNDED
+  VOID
+}
+
+enum TicketTransferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum CheckInMode {
+  ONLINE
+  OFFLINE
+}
+
+enum CheckInStatus {
+  ACCEPTED
+  REJECTED
+  DUPLICATE
+}
+
+enum AbuseTargetType {
+  EVENT
+  ORGANIZER
+  PLATFORM
+}
+
+enum AbuseReportStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+}
+
+enum RiskSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RiskStatus {
+  OPEN
+  INVESTIGATING
+  MITIGATED
+  CLOSED
+}
+
+enum SettlementStatus {
+  PENDING
+  READY
+  PAID
+}
+
+enum PayoutStatus {
+  SCHEDULED
+  IN_TRANSIT
+  SETTLED
+  FAILED
+}
+
+enum DataExportStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+
+enum PolicyDocumentType {
+  TERMS_OF_SERVICE
+  PRIVACY_POLICY
+  MARKETING_COMMUNICATIONS
+}
+
+enum DataDeletionRequestStatus {
+  REQUESTED
+  PROCESSING
+  COMPLETED
+  REJECTED
+}
+
+enum WebhookEventType {
+  RESERVATION_CREATED
+  RESERVATION_EXPIRED
+  ORDER_COMPLETED
+  PAYMENT_CAPTURED
+  TICKET_ISSUED
+  TICKET_TRANSFERRED
+  TICKET_CHECKED_IN
+  REFUND_PROCESSED
+  EVENT_PUBLISHED
+  EVENT_CANCELLED
+}
+
+enum WebhookEndpointStatus {
+  ACTIVE
+  PAUSED
+  DISABLED
+}
+
+enum WebhookOutboxStatus {
+  PENDING
+  DELIVERED
+  DEAD_LETTER
+}
+
+enum WebhookDeliveryStatus {
+  SUCCESS
+  FAILED
+}
+
+enum IntegrationProviderType {
+  PAYMENT
+  MESSAGING
+  MAPS
+  STREAMING
+}
+
+enum InboundProviderEventStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+}
+
+enum NotificationType {
+  ORDER_CONFIRMATION
+  EVENT_REMINDER
+  EVENT_UPDATE
+  ORGANIZER_ANNOUNCEMENT
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+  IN_APP
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  DEAD_LETTER
+  CANCELLED
+}
+
+enum NotificationAttemptStatus {
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model User {
+  id             String   @id @default(cuid())
+  name           String
+  email          String   @unique
+  emailVerified  Boolean  @default(false)
+  image          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  sessions         Session[]
+  accounts         Account[]
+  roleBindings     RoleBinding[]
+  createdEvents    Event[]          @relation("EventCreator")
+  reservations     Reservation[]
+  orders           Order[]          @relation("OrderBuyer")
+  ownedTickets     Ticket[]         @relation("TicketOwner")
+  attendeeTickets  Ticket[]         @relation("TicketAttendee")
+  waitlistEntries  WaitlistEntry[]
+  feedbacks        Feedback[]
+  abuseReports     AbuseReport[]    @relation("ReporterAbuseReports")
+  checkInEvents    CheckInEvent[]   @relation("ScannerCheckInEvents")
+  auditEvents      AuditEvent[]     @relation("AuditActor")
+  dataExportJobs   DataExportJob[]  @relation("RequesterDataExportJobs")
+  createdRiskCases RiskCase[]       @relation("RiskCaseCreator")
+  transferSent     TicketTransfer[] @relation("TransferFromUser")
+  transferReceived TicketTransfer[] @relation("TransferToUser")
+  gateStaffAssignments GateStaffAssignment[] @relation("GateStaffAssignee")
+  createdWebhookEndpoints WebhookEndpoint[] @relation("WebhookEndpointCreator")
+  notificationPreference NotificationPreference? @relation("NotificationPreferenceUser")
+  notificationDeliveries NotificationDelivery[] @relation("NotificationRecipient")
+  createdNotificationDeliveries NotificationDelivery[] @relation("NotificationDeliveryCreator")
+  policyAcceptances PolicyAcceptance[]
+  dataDeletionRequests DataDeletionRequest[]
+}
+
+model Session {
+  id                String     @id @default(cuid())
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  userId            String
+  expiresAt         DateTime
+  token             String     @unique
+  ipAddress         String?
+  userAgent         String?
+  activeContextType ScopeType?
+  activeContextId   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String   @id @default(cuid())
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  userId                String
+  providerId            String
+  accountId             String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  identifier String
+  value      String
+  expiresAt  DateTime
+
+  @@index([identifier])
+}
+
+model Organization {
+  id              String    @id @default(cuid())
+  legalName       String
+  displayName     String
+  kycStatus       KycStatus @default(PENDING)
+  defaultCurrency String
+  region          String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  roleBindings   RoleBinding[] @relation("OrganizationRoleBindings")
+  events         Event[]
+  orders         Order[]
+  settlements    Settlement[]
+  payouts        Payout[]
+  abuseReports   AbuseReport[] @relation("OrganizationAbuseReports")
+  dataExportJobs DataExportJob[]
+  riskCases      RiskCase[]    @relation("OrganizationRiskCases")
+  webhookEndpoints WebhookEndpoint[]
+  webhookOutboxEvents WebhookOutboxEvent[]
+  inboundProviderEvents InboundProviderEvent[]
+  notificationDeliveries NotificationDelivery[]
+}
+
+model RoleBinding {
+  id             String    @id @default(cuid())
+  userId         String
+  role           Role
+  scopeType      ScopeType
+  scopeId        String
+  permissions    Json
+  organizationId String?
+  eventId        String?
+  createdAt      DateTime  @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation("OrganizationRoleBindings", fields: [organizationId], references: [id], onDelete: SetNull)
+  event        Event?        @relation("EventRoleBindings", fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, role, scopeType, scopeId])
+  @@index([scopeType, scopeId])
+  @@index([organizationId])
+  @@index([eventId])
+}
+
+model Event {
+  id          String          @id @default(cuid())
+  orgId       String
+  title       String
+  description String?
+  coverImageUrl String?
+  galleryImages Json?
+  venueMode   VenueMode       @default(PHYSICAL)
+  registrationType RegistrationType @default(OPEN)
+  venueName   String?
+  venueAddress String?
+  virtualMeetingUrl String?
+  totalCapacity Int?
+  waitlistEnabled Boolean     @default(false)
+  slug        String?         @unique
+  brandingTheme String?
+  brandingLogoUrl String?
+  brandingPrimaryColor String?
+  brandingAccentColor String?
+  registrationFormConfig Json?
+  confirmationEmailTemplate String?
+  reminderEmailTemplate String?
+  reminderLeadHours Int?
+  organizerAnnouncementTemplate String?
+  shareMessage String?
+  referralEnabled Boolean     @default(false)
+  referralDefaultCode String?
+  campaignTrackingEnabled Boolean @default(false)
+  ticketSalesPaused Boolean   @default(false)
+  status      EventStatus     @default(DRAFT)
+  visibility  EventVisibility @default(PUBLIC)
+  startAt     DateTime
+  endAt       DateTime
+  timezone    String
+  version     Int             @default(1)
+  publishAt   DateTime?
+  createdBy   String
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  organization   Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  creator        User            @relation("EventCreator", fields: [createdBy], references: [id], onDelete: Restrict)
+  eventSessions  EventSession[]
+  gates          Gate[]
+  gateStaffAssignments GateStaffAssignment[]
+  ticketClasses  TicketClass[]
+  reservations   Reservation[]
+  waitlistEntries WaitlistEntry[]
+  orders         Order[]
+  tickets        Ticket[]
+  checkInEvents  CheckInEvent[]
+  gateTicketClassAccesses GateTicketClassAccess[]
+  feedbacks      Feedback[]
+  settlements    Settlement[]
+  roleBindings   RoleBinding[]   @relation("EventRoleBindings")
+  abuseReports   AbuseReport[]   @relation("EventAbuseReports")
+  riskCases      RiskCase[]      @relation("EventRiskCases")
+  webhookEndpoints WebhookEndpoint[]
+  webhookOutboxEvents WebhookOutboxEvent[]
+  inboundProviderEvents InboundProviderEvent[]
+  notificationDeliveries NotificationDelivery[]
+  dataExportJobs DataExportJob[]
+
+  @@index([orgId, status])
+  @@index([startAt, endAt])
+  @@index([visibility, status])
+}
+
+model EventSession {
+  id              String             @id @default(cuid())
+  eventId         String
+  title           String
+  startAt         DateTime
+  endAt           DateTime
+  room            String?
+  capacity        Int
+  waitlistEnabled Boolean            @default(false)
+  status          EventSessionStatus @default(SCHEDULED)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId, status])
+}
+
+model Gate {
+  id        String   @id @default(cuid())
+  eventId   String
+  name      String
+  code      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  staffAssignments GateStaffAssignment[]
+  checkInEvents CheckInEvent[]
+  ticketClassAccesses GateTicketClassAccess[]
+
+  @@unique([eventId, name])
+}
+
+model GateStaffAssignment {
+  id             String   @id @default(cuid())
+  gateId         String
+  eventId        String
+  userId         String
+  assignmentRole String?
+  createdAt      DateTime @default(now())
+
+  gate  Gate  @relation(fields: [gateId], references: [id], onDelete: Cascade)
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User  @relation("GateStaffAssignee", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([gateId, userId])
+  @@index([eventId, gateId])
+  @@index([userId, eventId])
+}
+
+model GateTicketClassAccess {
+  id            String   @id @default(cuid())
+  eventId       String
+  gateId        String
+  ticketClassId String
+  createdAt     DateTime @default(now())
+
+  event      Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  gate       Gate       @relation(fields: [gateId], references: [id], onDelete: Cascade)
+  ticketClass TicketClass @relation(fields: [ticketClassId], references: [id], onDelete: Cascade)
+
+  @@unique([gateId, ticketClassId])
+  @@index([eventId, gateId])
+  @@index([eventId, ticketClassId])
+}
+
+model TicketClass {
+  id            String    @id @default(cuid())
+  eventId       String
+  name          String
+  type          TicketType
+  price         Decimal   @db.Decimal(12, 2)
+  currency      String
+  salesStartAt  DateTime
+  salesEndAt    DateTime
+  capacity      Int
+  perOrderLimit Int
+  hidden        Boolean   @default(false)
+  releaseStrategy TicketReleaseStrategy @default(STANDARD)
+  unlockCode    String?
+  dynamicPricingConfig Json?
+  bulkPricingConfig Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  event          Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  reservationItems ReservationItem[]
+  waitlistEntries WaitlistEntry[]
+  tickets        Ticket[]
+  gateAccesses   GateTicketClassAccess[]
+
+  @@index([eventId, salesStartAt, salesEndAt])
+}
+
+model Reservation {
+  id             String            @id @default(cuid())
+  eventId        String
+  userId         String
+  status         ReservationStatus @default(PENDING)
+  expiresAt      DateTime
+  source         String?
+  idempotencyKey String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  items ReservationItem[]
+  order Order?
+
+  @@unique([idempotencyKey])
+  @@index([eventId, status])
+  @@index([userId, status])
+}
+
+model ReservationItem {
+  id            String @id @default(cuid())
+  reservationId String
+  ticketClassId String
+  quantity      Int
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  ticketClass TicketClass @relation(fields: [ticketClassId], references: [id], onDelete: Restrict)
+
+  @@index([reservationId])
+  @@index([ticketClassId])
+}
+
+model WaitlistEntry {
+  id             String         @id @default(cuid())
+  eventId        String
+  ticketClassId  String
+  userId         String
+  priority       Int
+  status         WaitlistStatus @default(WAITING)
+  notifiedAt     DateTime?
+  claimExpiresAt DateTime?
+  createdAt      DateTime       @default(now())
+
+  event      Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  ticketClass TicketClass @relation(fields: [ticketClassId], references: [id], onDelete: Restrict)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([eventId, ticketClassId, status])
+  @@index([userId, eventId])
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  orgId          String
+  eventId        String
+  reservationId  String      @unique
+  buyerUserId    String
+  buyerSnapshot  Json?
+  attendeeSnapshot Json?
+  customFieldResponses Json?
+  promoCode      String?
+  referralCode   String?
+  invoiceRequested Boolean   @default(false)
+  invoiceReference String?
+  checkoutSessionFingerprint String?
+  status         OrderStatus @default(PENDING)
+  subtotalAmount Decimal     @db.Decimal(12, 2)
+  taxAmount      Decimal     @db.Decimal(12, 2)
+  feeAmount      Decimal     @db.Decimal(12, 2)
+  discountAmount Decimal     @db.Decimal(12, 2)
+  totalAmount    Decimal     @db.Decimal(12, 2)
+  currency       String
+  completedAt    DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  event        Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  reservation  Reservation  @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  buyer        User         @relation("OrderBuyer", fields: [buyerUserId], references: [id], onDelete: Restrict)
+
+  paymentAttempts PaymentAttempt[]
+  refunds         Refund[]
+  tickets         Ticket[]
+
+  @@index([orgId, status])
+  @@index([eventId, status])
+  @@index([buyerUserId, status])
+  @@index([checkoutSessionFingerprint])
+}
+
+model PaymentAttempt {
+  id              String               @id @default(cuid())
+  orderId         String
+  provider        String
+  providerReference String?
+  providerEventId String?
+  checkoutUrl     String?
+  status          PaymentAttemptStatus @default(INITIATED)
+  amount          Decimal              @db.Decimal(12, 2)
+  currency        String
+  idempotencyKey  String
+  failureCode     String?
+  metadata        Json?
+  callbackPayload Json?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  refunds Refund[]
+
+  @@unique([idempotencyKey])
+  @@unique([provider, providerEventId])
+  @@index([orderId, status])
+  @@index([provider, providerReference])
+}
+
+model Refund {
+  id               String       @id @default(cuid())
+  orderId          String
+  paymentAttemptId String
+  amount           Decimal      @db.Decimal(12, 2)
+  currency         String
+  reason           String
+  status           RefundStatus @default(REQUESTED)
+  requestedBy      String
+  createdAt        DateTime     @default(now())
+  completedAt      DateTime?
+
+  order          Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentAttempt PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  @@index([orderId, status])
+}
+
+model Ticket {
+  id            String       @id @default(cuid())
+  eventId       String
+  ticketClassId String
+  orderId       String
+  ownerId       String
+  attendeeId    String
+  qrToken       String       @unique
+  deliveryChannels Json?
+  status        TicketStatus @default(VALID)
+  cancelledAt   DateTime?
+  cancellationReason String?
+  issuedAt      DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  event      Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  ticketClass TicketClass @relation(fields: [ticketClassId], references: [id], onDelete: Restrict)
+  order      Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  owner      User       @relation("TicketOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  attendee   User       @relation("TicketAttendee", fields: [attendeeId], references: [id], onDelete: Restrict)
+
+  transfers     TicketTransfer[]
+  checkInEvents CheckInEvent[]
+
+  @@index([eventId, status])
+  @@index([ownerId, status])
+  @@index([attendeeId, status])
+}
+
+model TicketTransfer {
+  id         String               @id @default(cuid())
+  ticketId   String
+  fromUserId String
+  toUserId   String
+  status     TicketTransferStatus @default(PENDING)
+  respondedAt DateTime?
+  responseReason String?
+  expiresAt  DateTime
+  createdAt  DateTime             @default(now())
+
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  fromUser User   @relation("TransferFromUser", fields: [fromUserId], references: [id], onDelete: Restrict)
+  toUser   User   @relation("TransferToUser", fields: [toUserId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId, status])
+  @@index([toUserId, status])
+}
+
+model CheckInEvent {
+  id       String        @id @default(cuid())
+  ticketId String
+  eventId  String
+  gateId   String
+  scannedBy String
+  mode     CheckInMode
+  status   CheckInStatus
+  reason   String?
+  deviceId String?
+  clientScanId String?
+  scannedAt DateTime
+  syncedAt DateTime?
+
+  ticket  Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  gate    Gate   @relation(fields: [gateId], references: [id], onDelete: Restrict)
+  scanner User   @relation("ScannerCheckInEvents", fields: [scannedBy], references: [id], onDelete: Restrict)
+
+  @@index([eventId, scannedAt])
+  @@index([gateId, scannedAt])
+  @@index([ticketId, status])
+  @@unique([eventId, clientScanId])
+}
+
+model Feedback {
+  id         String   @id @default(cuid())
+  eventId    String
+  userId     String
+  rating     Int
+  reviewText String?
+  tags       Json?
+  createdAt  DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([eventId, rating])
+}
+
+model AbuseReport {
+  id             String           @id @default(cuid())
+  reporterId     String
+  targetType     AbuseTargetType
+  targetId       String
+  category       String
+  description    String
+  evidenceUrls   Json?
+  status         AbuseReportStatus @default(OPEN)
+  eventId        String?
+  organizationId String?
+  createdAt      DateTime         @default(now())
+  resolvedAt     DateTime?
+
+  reporter     User          @relation("ReporterAbuseReports", fields: [reporterId], references: [id], onDelete: Restrict)
+  event        Event?        @relation("EventAbuseReports", fields: [eventId], references: [id], onDelete: SetNull)
+  organization Organization? @relation("OrganizationAbuseReports", fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([targetType, targetId, status])
+  @@index([reporterId, createdAt])
+}
+
+model RiskCase {
+  id             String       @id @default(cuid())
+  scopeType      ScopeType
+  scopeId        String
+  source         String
+  severity       RiskSeverity
+  status         RiskStatus   @default(OPEN)
+  eventId        String?
+  organizationId String?
+  createdBy      String?
+  createdAt      DateTime     @default(now())
+
+  event        Event?        @relation("EventRiskCases", fields: [eventId], references: [id], onDelete: SetNull)
+  organization Organization? @relation("OrganizationRiskCases", fields: [organizationId], references: [id], onDelete: SetNull)
+  creator      User?         @relation("RiskCaseCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([scopeType, scopeId, status])
+  @@index([severity, status])
+}
+
+model Settlement {
+  id                 String           @id @default(cuid())
+  orgId              String
+  eventId            String
+  grossAmount        Decimal          @db.Decimal(12, 2)
+  taxAmount          Decimal          @db.Decimal(12, 2)
+  platformFeeAmount  Decimal          @db.Decimal(12, 2)
+  processorFeeAmount Decimal          @db.Decimal(12, 2)
+  netAmount          Decimal          @db.Decimal(12, 2)
+  currency           String
+  status             SettlementStatus @default(PENDING)
+  periodStart        DateTime
+  periodEnd          DateTime
+  payoutId           String?
+  createdAt          DateTime         @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  event        Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  payout       Payout?      @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, status])
+  @@index([eventId, status])
+}
+
+model Payout {
+  id        String       @id @default(cuid())
+  orgId     String
+  amount    Decimal      @db.Decimal(12, 2)
+  currency  String
+  status    PayoutStatus @default(SCHEDULED)
+  reference String?
+  paidAt    DateTime?
+  createdAt DateTime     @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  settlements  Settlement[]
+
+  @@index([orgId, status])
+}
+
+model AuditEvent {
+  id        String    @id @default(cuid())
+  actorId   String?
+  actorType String
+  action    String
+  scopeType ScopeType
+  scopeId   String
+  targetType String
+  targetId  String
+  oldValue  Json?
+  newValue  Json?
+  reason    String?
+  createdAt DateTime  @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([scopeType, scopeId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model DataExportJob {
+  id          String           @id @default(cuid())
+  orgId       String
+  eventId     String?
+  requestedBy String
+  type        String
+  status      DataExportStatus @default(QUEUED)
+  requestedReason String?
+  completedAt DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime         @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  event        Event?        @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  requester    User         @relation("RequesterDataExportJobs", fields: [requestedBy], references: [id], onDelete: Restrict)
+
+  @@index([orgId, status])
+  @@index([eventId, status])
+  @@index([requestedBy, createdAt])
+}
+
+model PolicyAcceptance {
+  id              String             @id @default(cuid())
+  userId          String
+  documentType    PolicyDocumentType
+  documentVersion String
+  scopeType       ScopeType          @default(PERSONAL)
+  scopeId         String
+  acceptedAt      DateTime           @default(now())
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime           @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, documentType, documentVersion, scopeType, scopeId])
+  @@index([userId, acceptedAt])
+  @@index([documentType, documentVersion, acceptedAt])
+}
+
+model DataDeletionRequest {
+  id            String                    @id @default(cuid())
+  userId        String
+  status        DataDeletionRequestStatus @default(REQUESTED)
+  reason        String?
+  requestedAt   DateTime                  @default(now())
+  processedAt   DateTime?
+  processorNote String?
+  metadata      Json?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, requestedAt])
+  @@index([userId, requestedAt])
+}
+
+model WebhookEndpoint {
+  id                   String               @id @default(cuid())
+  orgId                String
+  eventId              String?
+  name                 String
+  url                  String
+  status               WebhookEndpointStatus @default(ACTIVE)
+  subscribedEventTypes Json
+  activeSigningKeyId   String
+  activeSigningSecret  String
+  previousSigningKeyId String?
+  previousSigningSecret String?
+  lastRotatedAt        DateTime?
+  createdBy            String?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  event        Event?       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  creator      User?        @relation("WebhookEndpointCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  deliveries WebhookDeliveryAttempt[]
+
+  @@index([orgId, status])
+  @@index([eventId, status])
+}
+
+model WebhookOutboxEvent {
+  id             String            @id @default(cuid())
+  orgId          String
+  eventId        String?
+  eventType      WebhookEventType
+  eventVersion   Int               @default(1)
+  idempotencyKey String            @unique
+  payload        Json
+  metadata       Json?
+  status         WebhookOutboxStatus @default(PENDING)
+  attemptCount   Int               @default(0)
+  maxAttempts    Int               @default(8)
+  nextAttemptAt  DateTime          @default(now())
+  lastError      String?
+  deadLetteredAt DateTime?
+  deliveredAt    DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  event        Event?       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  deliveries WebhookDeliveryAttempt[]
+
+  @@index([status, nextAttemptAt])
+  @@index([orgId, eventType, createdAt])
+  @@index([eventId, eventType, createdAt])
+}
+
+model WebhookDeliveryAttempt {
+  id             String               @id @default(cuid())
+  outboxEventId  String
+  endpointId     String
+  attemptNumber  Int
+  status         WebhookDeliveryStatus
+  httpStatus     Int?
+  responseBody   String?
+  responseTimeMs Int?
+  signatureKeyId String?
+  createdAt      DateTime             @default(now())
+
+  outboxEvent WebhookOutboxEvent @relation(fields: [outboxEventId], references: [id], onDelete: Cascade)
+  endpoint   WebhookEndpoint    @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([outboxEventId, attemptNumber])
+  @@index([endpointId, createdAt])
+}
+
+model InboundProviderEvent {
+  id              String                   @id @default(cuid())
+  providerType    IntegrationProviderType
+  provider        String
+  providerEventId String
+  eventType       String?
+  signature       String?
+  payload         Json
+  status          InboundProviderEventStatus @default(RECEIVED)
+  errorMessage    String?
+  processedAt     DateTime?
+  orgId           String?
+  eventId         String?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  event        Event?        @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, providerEventId])
+  @@index([providerType, status, createdAt])
+  @@index([eventId, status])
+  @@index([orgId, status])
+}
+
+model NotificationPreference {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  emailEnabled  Boolean  @default(true)
+  smsEnabled    Boolean  @default(false)
+  pushEnabled   Boolean  @default(true)
+  inAppEnabled  Boolean  @default(true)
+  emailConsent  Boolean  @default(true)
+  smsConsent    Boolean  @default(false)
+  pushConsent   Boolean  @default(true)
+  marketingOptIn Boolean @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation("NotificationPreferenceUser", fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model NotificationDelivery {
+  id              String                     @id @default(cuid())
+  orgId           String?
+  eventId         String?
+  userId          String
+  type            NotificationType
+  channel         NotificationChannel
+  subject         String?
+  content         String
+  recipientAddress String?
+  metadata        Json?
+  status          NotificationDeliveryStatus @default(PENDING)
+  scheduledFor    DateTime                   @default(now())
+  nextAttemptAt   DateTime                   @default(now())
+  attemptCount    Int                        @default(0)
+  maxAttempts     Int                        @default(6)
+  sentAt          DateTime?
+  failedAt        DateTime?
+  failureReason   String?
+  idempotencyKey  String                     @unique
+  createdBy       String?
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  event        Event?        @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  recipient    User          @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  creator      User?         @relation("NotificationDeliveryCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  attempts NotificationDeliveryAttempt[]
+
+  @@index([status, nextAttemptAt])
+  @@index([userId, createdAt])
+  @@index([eventId, type, createdAt])
+  @@index([orgId, type, createdAt])
+}
+
+model NotificationDeliveryAttempt {
+  id              String                    @id @default(cuid())
+  notificationId  String
+  attemptNumber   Int
+  status          NotificationAttemptStatus
+  provider        String?
+  responseCode    String?
+  responseMessage String?
+  createdAt       DateTime                  @default(now())
+
+  notification NotificationDelivery @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@index([notificationId, attemptNumber])
+  @@index([status, createdAt])
+}

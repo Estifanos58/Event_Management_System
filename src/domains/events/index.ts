@@ -1,0 +1,78 @@
+export const eventsDomain = {
+  name: "events",
+  description:
+    "Owns event lifecycle orchestration, publishing transitions, and session/gate setup.",
+};
+
+export {
+  createEventDraftAction,
+  createEventSessionAction,
+  createEventGateAction,
+  assignEventStaffAction,
+  createEventTicketClassAction,
+  updateEventExperienceAction,
+  setEventTicketSalesPausedAction,
+  updateEventBasicsAction,
+  transitionEventStatusAction,
+  duplicateEventAction,
+  type EventActionState,
+} from "@/domains/events/actions";
+export {
+  createEventDraft,
+  createEventSession,
+  createEventGate,
+  assignEventStaff,
+  createEventTicketClass,
+  updateEventExperience,
+  setEventTicketSalesPaused,
+  updateEventBasics,
+  transitionEventStatus,
+  duplicateEventAsDraft,
+  getEventsOverviewSnapshot,
+  getEventDetailSnapshot,
+  parseEventDraftInput,
+  parseEventBasicsInput,
+  parseEventSessionInput,
+  parseEventGateInput,
+  parseEventStaffAssignmentInput,
+  parseEventTicketClassInput,
+  parseEventExperienceInput,
+  parseEventSalesPauseInput,
+  parseEventTransitionInput,
+  parseEventDuplicateMode,
+  type EventsOverviewSnapshot,
+  type EventDetailSnapshot,
+} from "@/domains/events/service";
+export {
+  listAllowedTransitions,
+  isTransitionAllowed,
+  assertTransitionAllowed,
+  requiresReasonForTransition,
+  requiresVerifiedOrganization,
+} from "@/domains/events/lifecycle";
+export {
+  EventDomainError,
+  toEventErrorResponse,
+  type EventDomainErrorCode,
+} from "@/domains/events/errors";
+export {
+  EVENT_LIFECYCLE_STEPS,
+  EVENT_TRANSITION_MAP,
+  EVENT_VISIBILITY_OPTIONS,
+  VENUE_MODE_OPTIONS,
+  REGISTRATION_TYPE_OPTIONS,
+  TICKET_TYPE_OPTIONS,
+  TICKET_RELEASE_STRATEGY_OPTIONS,
+  EVENT_DUPLICATE_MODES,
+  type EventDuplicateMode,
+  type EventDraftInput,
+  type EventBasicsInput,
+  type EventSessionInput,
+  type EventGateInput,
+  type EventStaffAssignmentInput,
+  type EventTicketClassInput,
+  type EventExperienceInput,
+  type EventSalesPauseInput,
+  type EventTransitionInput,
+  type EventListItem,
+} from "@/domains/events/types";

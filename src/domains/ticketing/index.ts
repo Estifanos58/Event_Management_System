@@ -1,0 +1,50 @@
+export const ticketingDomain = {
+  name: "ticketing",
+  description:
+    "Owns ticket classes, reservations, holds, waitlist promotion, and inventory consistency.",
+};
+
+export {
+  createReservation,
+  getActiveReservationForUser,
+  getMyEventTickets,
+  expireStaleReservations,
+  joinWaitlist,
+  claimWaitlistSpot,
+  promoteWaitlist,
+  createCheckoutOrder,
+  initializeOrderPayment,
+  processChapaWebhook,
+  retryOrderPayment,
+  reconcilePendingPayments,
+  requestTicketTransfer,
+  respondToTicketTransfer,
+  cancelTicket,
+  runTicketingMaintenance,
+  parseCreateReservationInput,
+  parseJoinWaitlistInput,
+  parseClaimWaitlistInput,
+  parseCheckoutInput,
+  parseTicketTransferRequestInput,
+  parseTicketTransferResponseInput,
+  parseTicketCancellationInput,
+} from "@/domains/ticketing/service";
+export {
+  TicketingDomainError,
+  toTicketingErrorResponse,
+  type TicketingDomainErrorCode,
+} from "@/domains/ticketing/errors";
+export type {
+  ReservationRequestItemInput,
+  CreateReservationInput,
+  JoinWaitlistInput,
+  ClaimWaitlistInput,
+  CheckoutInput,
+  InitializePaymentInput,
+  RetryPaymentInput,
+  TicketTransferRequestInput,
+  TicketTransferResponseInput,
+  TicketCancellationInput,
+  TicketingMaintenanceResult,
+  PaymentReconciliationResult,
+} from "@/domains/ticketing/types";

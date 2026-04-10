@@ -1,0 +1,30 @@
+{
+  "profileName": "phase15-staging-readiness-drill",
+  "observedAt": "2026-04-07T00:00:00.000Z",
+  "load": {
+    "concurrentBuyers": 12000,
+    "reservationThroughputPerMinute": 2350,
+    "checkinBurstPerSecond": 112,
+    "notificationBurstMessages": 123500,
+    "reservationP95Ms": 318,
+    "checkoutToPaymentInitP95Ms": 581,
+    "ticketIssuanceP95Seconds": 44,
+    "checkinValidationP95Ms": 191
+  },
+  "failureRecovery": {
+    "paymentGatewayTimeoutInjected": true,
+    "webhookConsumerFailureInjected": true,
+    "notificationDependencyFailureInjected": true,
+    "alertingValidated": true,
+    "backlogRecoveredMinutes": 86,
+    "reconciliationCompleted": true,
+    "duplicateTicketIssuanceDetected": false
+  },
+  "continuity": {
+    "rtoMinutes": 42,
+    "rpoMinutes": 3,
+    "degradedCheckinModeActivated": true,
+    "manualGateFallbackActivated": true,
+    "offlineSyncConvergenceMinutes": 4
+  }
+}
