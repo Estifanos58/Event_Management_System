@@ -1,8 +1,11 @@
 import { TicketTransferStatus } from "@prisma/client";
 import Link from "next/link";
+import QRCode from "qrcode";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { prisma } from "@/core/db/prisma";
 import { requireDashboardSnapshot } from "../../_lib/access";
+
+const INLINE_QR_PREVIEW_LIMIT = 12;
 
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("en-US", {
@@ -60,6 +63,20 @@ export default async function AttendeeTicketsPage() {
     take: 120,
   });
 
+  const qrPreviewByTicketId = new Map<string, string>();
+
+  for (const ticket of tickets.slice(0, INLINE_QR_PREVIEW_LIMIT)) {
+    const qrDataUrl = await QRCode.toDataURL(ticket.qrToken, {
+      width: 116,
+      margin: 1,
+      errorCorrectionLevel: "M",
+    }).catch(() => null);
+
+    if (qrDataUrl) {
+      qrPreviewByTicketId.set(ticket.id, qrDataUrl);
+    }
+  }
+
   return (
     <div className="space-y-8">
       <header>
@@ -93,6 +110,26 @@ export default async function AttendeeTicketsPage() {
                   <CardDescription>{ticket.event.startAt.toLocaleString()}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm text-gray-500">
+                  {qrPreviewByTicketId.get(ticket.id) ? (
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">QR Preview</p>
+                      <div className="mt-2 flex items-center justify-center rounded-lg border border-gray-200 bg-white p-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={qrPreviewByTicketId.get(ticket.id)}
+                          alt={`Ticket ${ticket.id} QR preview`}
+                          className="h-24 w-24"
+                        />
+                      </div>
+                      <p className="mt-2 text-xs text-gray-500">Open ticket for full-size scan view.</p>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">QR Preview</p>
+                      <p className="mt-1 text-xs text-gray-500">Open ticket to view and present your QR code.</p>
+                    </div>
+                  )}
+
                   <div className="grid gap-2 sm:grid-cols-2">
                     <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
                       <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Ticket</p>

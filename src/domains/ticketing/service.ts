@@ -22,6 +22,8 @@ import {
   getTraceMetadataFromContext,
   withObservabilityContext,
 } from "@/core/observability/context";
+import { TICKET_QR_PREFIX } from "@/domains/checkin/qr-payload";
+import { createSignedTicketQrToken } from "@/domains/checkin/qr-signing";
 import { TicketingDomainError } from "@/domains/ticketing/errors";
 import type {
   CheckoutInput,
@@ -677,8 +679,86 @@ function generateInvoiceReference(orderId: string) {
   return `INV-${orderId.slice(-8).toUpperCase()}`;
 }
 
-function generateTicketQrToken() {
-  return crypto.randomUUID();
+function generateTicketQrToken(input: {
+  ticketId: string;
+  buyerId: string;
+  eventId: string;
+  boughtAt: Date;
+}) {
+  return createSignedTicketQrToken(
+    {
+      version: 1,
+      ticketId: input.ticketId,
+      buyerId: input.buyerId,
+      eventId: input.eventId,
+      boughtAt: input.boughtAt.toISOString(),
+    },
+    env.CHECKIN_QR_SECRET ?? env.BETTER_AUTH_SECRET,
+  );
+}
+
+async function rotateLegacyTicketQrTokens(eventId?: string) {
+  const batchSize = 200;
+  let rotated = 0;
+
+  while (true) {
+    const legacyTickets = await prisma.ticket.findMany({
+      where: {
+        ...(eventId
+          ? {
+              eventId,
+            }
+          : {}),
+        qrToken: {
+          not: {
+            startsWith: `${TICKET_QR_PREFIX}.`,
+          },
+        },
+      },
+      select: {
+        id: true,
+        eventId: true,
+        issuedAt: true,
+        order: {
+          select: {
+            buyerUserId: true,
+          },
+        },
+      },
+      orderBy: {
+        issuedAt: "asc",
+      },
+      take: batchSize,
+    });
+
+    if (legacyTickets.length === 0) {
+      break;
+    }
+
+    const updateOperations = legacyTickets.map((ticket) => prisma.ticket.update({
+      where: {
+        id: ticket.id,
+      },
+      data: {
+        qrToken: generateTicketQrToken({
+          ticketId: ticket.id,
+          buyerId: ticket.order.buyerUserId,
+          eventId: ticket.eventId,
+          boughtAt: ticket.issuedAt,
+        }),
+      },
+    }));
+
+    await prisma.$transaction(updateOperations);
+
+    rotated += updateOperations.length;
+
+    if (legacyTickets.length < batchSize) {
+      break;
+    }
+  }
+
+  return rotated;
 }
 
 function assertWebhookSecret(receivedSignature: string | null) {
@@ -1898,12 +1978,30 @@ async function markOrderCaptured(
             orderId: order.id,
             ownerId: order.buyerUserId,
             attendeeId,
-            qrToken: generateTicketQrToken(),
+            qrToken: crypto.randomUUID(),
             status: TicketStatus.VALID,
             deliveryChannels: {
               email: true,
               inApp: true,
             } as Prisma.InputJsonValue,
+          },
+          select: {
+            id: true,
+            issuedAt: true,
+          },
+        });
+
+        await tx.ticket.update({
+          where: {
+            id: ticket.id,
+          },
+          data: {
+            qrToken: generateTicketQrToken({
+              ticketId: ticket.id,
+              buyerId: order.buyerUserId,
+              eventId: order.eventId,
+              boughtAt: ticket.issuedAt,
+            }),
           },
         });
 
@@ -2591,6 +2689,7 @@ export async function runTicketingMaintenance(eventId?: string): Promise<Ticketi
 
   let promotedWaitlistEntries = 0;
   let reconciledPaymentAttempts = 0;
+  const rotatedLegacyQrTokens = await rotateLegacyTicketQrTokens(eventId);
 
   if (eventId) {
     const promoted = await promoteWaitlist(eventId);
@@ -2606,5 +2705,6 @@ export async function runTicketingMaintenance(eventId?: string): Promise<Ticketi
     expiredTransfers,
     expiredWaitlistClaims,
     reconciledPaymentAttempts,
+    rotatedLegacyQrTokens,
   };
 }

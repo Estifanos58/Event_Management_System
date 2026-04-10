@@ -8,6 +8,10 @@ import {
 export type CheckInScanInput = {
   qrToken: string;
   gateId: string;
+  ticketId?: string;
+  buyerId?: string;
+  eventId?: string;
+  boughtAt?: string;
   scannedAt?: Date;
   mode?: CheckInMode;
   deviceId?: string;
@@ -68,6 +72,9 @@ export type OfflineCheckInSyncScan = {
   mode?: CheckInMode;
   ticketId?: string;
   qrToken?: string;
+  buyerId?: string;
+  eventId?: string;
+  boughtAt?: string;
   manualOverride?: boolean;
   reason?: string;
 };

@@ -16,6 +16,8 @@ import { createWsAuthToken } from "@/core/ws/auth";
 import { WS_CHANNELS, WS_EVENTS } from "@/core/ws/events";
 import { publishWsChannelEvent } from "@/core/ws/publisher";
 import { CheckInDomainError } from "@/domains/checkin/errors";
+import { TICKET_QR_PREFIX } from "@/domains/checkin/qr-payload";
+import { verifySignedTicketQrToken } from "@/domains/checkin/qr-signing";
 import { sortOfflineCheckInScansForSync } from "@/domains/checkin/sync";
 import type {
   CheckInIncident,
@@ -41,6 +43,10 @@ const scanPayloadSchema = z.object({
     .trim()
     .min(12, "QR token must contain at least 12 characters."),
   gateId: z.string().trim().min(1, "Gate id is required."),
+  ticketId: z.string().trim().min(1, "Ticket id is required.").optional(),
+  buyerId: z.string().trim().min(1, "Buyer id is required.").optional(),
+  eventId: z.string().trim().min(1, "Event id is required.").optional(),
+  boughtAt: z.coerce.date().optional(),
   scannedAt: z.coerce.date().optional(),
   mode: z.enum(CheckInMode).optional(),
   deviceId: z
@@ -113,6 +119,9 @@ const offlineSyncPayloadSchema = z.object({
             .trim()
             .min(12, "QR token must contain at least 12 characters.")
             .optional(),
+          buyerId: z.string().trim().min(1, "Buyer id is required.").optional(),
+          eventId: z.string().trim().min(1, "Event id is required.").optional(),
+          boughtAt: z.coerce.date().optional(),
           manualOverride: z.boolean().optional(),
           reason: z
             .string()
@@ -189,6 +198,12 @@ type ProcessCheckInInput = {
   deviceId?: string;
   clientScanId?: string;
   lookup: TicketLookup;
+  qrClaims?: {
+    ticketId?: string;
+    buyerId?: string;
+    eventId?: string;
+    boughtAt?: Date;
+  };
   allowGatePolicyBypass: boolean;
   manualReason?: string;
   manualOverride: boolean;
@@ -416,6 +431,146 @@ function isClientScanUniqueViolation(
   );
 }
 
+function isTicketRowLockUnavailable(error: unknown) {
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2010") {
+    const meta = (error.meta ?? {}) as { code?: unknown; message?: unknown };
+    const providerCode = String(meta.code ?? "").trim();
+    const providerMessage = String(meta.message ?? "").toLowerCase();
+
+    return (
+      providerCode === "55P03"
+      || providerMessage.includes("could not obtain lock on row")
+      || providerMessage.includes("lock not available")
+    );
+  }
+
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+
+    return (
+      message.includes("could not obtain lock on row")
+      || message.includes("lock not available")
+    );
+  }
+
+  return false;
+}
+
+function getCheckInQrSecret() {
+  return env.CHECKIN_QR_SECRET ?? env.BETTER_AUTH_SECRET;
+}
+
+function hasClientQrClaims(input: {
+  ticketId?: string;
+  buyerId?: string;
+  eventId?: string;
+  boughtAt?: Date;
+}) {
+  return Boolean(input.ticketId || input.buyerId || input.eventId || input.boughtAt);
+}
+
+function isStructuredTicketQrToken(token: string) {
+  return token.startsWith(`${TICKET_QR_PREFIX}.`);
+}
+
+function resolveAndVerifyQrPayload(input: {
+  qrToken?: string;
+  eventId: string;
+  qrClaims?: {
+    ticketId?: string;
+    buyerId?: string;
+    eventId?: string;
+    boughtAt?: Date;
+  };
+}) {
+  if (!input.qrToken) {
+    return null;
+  }
+
+  if (!isStructuredTicketQrToken(input.qrToken)) {
+    if (input.qrClaims && hasClientQrClaims(input.qrClaims)) {
+      throw new CheckInDomainError(
+        422,
+        "UNPROCESSABLE_CHECKIN",
+        "Scanner metadata was provided for an unsupported QR format.",
+      );
+    }
+
+    return null;
+  }
+
+  const payload = verifySignedTicketQrToken(input.qrToken, getCheckInQrSecret());
+
+  if (!payload) {
+    throw new CheckInDomainError(
+      422,
+      "UNPROCESSABLE_CHECKIN",
+      "Invalid or tampered QR payload.",
+    );
+  }
+
+  const boughtAt = new Date(payload.boughtAt);
+
+  if (Number.isNaN(boughtAt.getTime())) {
+    throw new CheckInDomainError(
+      422,
+      "UNPROCESSABLE_CHECKIN",
+      "QR payload contains an invalid purchase timestamp.",
+    );
+  }
+
+  if (payload.eventId !== input.eventId) {
+    throw new CheckInDomainError(
+      422,
+      "UNPROCESSABLE_CHECKIN",
+      "QR payload event does not match the scan event.",
+    );
+  }
+
+  if (input.qrClaims?.ticketId && input.qrClaims.ticketId !== payload.ticketId) {
+    throw new CheckInDomainError(
+      422,
+      "UNPROCESSABLE_CHECKIN",
+      "Scanner ticket metadata does not match QR payload.",
+    );
+  }
+
+  if (input.qrClaims?.buyerId && input.qrClaims.buyerId !== payload.buyerId) {
+    throw new CheckInDomainError(
+      422,
+      "UNPROCESSABLE_CHECKIN",
+      "Scanner buyer metadata does not match QR payload.",
+    );
+  }
+
+  if (input.qrClaims?.eventId && input.qrClaims.eventId !== payload.eventId) {
+    throw new CheckInDomainError(
+      422,
+      "UNPROCESSABLE_CHECKIN",
+      "Scanner event metadata does not match QR payload.",
+    );
+  }
+
+  if (input.qrClaims?.boughtAt) {
+    const deltaMs = Math.abs(input.qrClaims.boughtAt.getTime() - boughtAt.getTime());
+
+    if (deltaMs > 1000) {
+      throw new CheckInDomainError(
+        422,
+        "UNPROCESSABLE_CHECKIN",
+        "Scanner purchase timestamp does not match QR payload.",
+      );
+    }
+  }
+
+  return {
+    ticketId: payload.ticketId,
+    buyerId: payload.buyerId,
+    eventId: payload.eventId,
+    boughtAt,
+  };
+}
+
 async function requireCheckInPermission(
   eventId: string,
   permission: CheckInPermission,
@@ -531,32 +686,51 @@ async function processCheckIn(input: ProcessCheckInInput): Promise<CheckInResult
     return toCheckInResult(existingRecord, input.manualOverride);
   }
 
+  const verifiedQrPayload = resolveAndVerifyQrPayload({
+    qrToken: input.lookup.qrToken,
+    eventId: input.eventId,
+    qrClaims: input.qrClaims,
+  });
+  const lookupTicketId = input.lookup.ticketId ?? verifiedQrPayload?.ticketId;
+
+  if (!lookupTicketId && !input.lookup.qrToken) {
+    throw new CheckInDomainError(
+      400,
+      "BAD_REQUEST",
+      "Either ticket id or QR token is required.",
+    );
+  }
+
+  const ticketLocator = await prisma.ticket.findFirst({
+    where: {
+      eventId: input.eventId,
+      ...(lookupTicketId
+        ? {
+            id: lookupTicketId,
+          }
+        : {
+            qrToken: input.lookup.qrToken,
+          }),
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!ticketLocator) {
+    throw new CheckInDomainError(
+      404,
+      "TICKET_NOT_FOUND",
+      "Ticket not found for this event.",
+    );
+  }
+
   try {
     const record = await prisma.$transaction(async (tx) => {
-      const ticketLocator = await tx.ticket.findFirst({
-        where: {
-          eventId: input.eventId,
-          ...(input.lookup.ticketId
-            ? { id: input.lookup.ticketId }
-            : { qrToken: input.lookup.qrToken }),
-        },
-        select: {
-          id: true,
-        },
-      });
-
-      if (!ticketLocator) {
-        throw new CheckInDomainError(
-          404,
-          "TICKET_NOT_FOUND",
-          "Ticket not found for this event.",
-        );
-      }
-
       await tx.$executeRaw`
         SELECT 1 FROM "Ticket"
         WHERE "id" = ${ticketLocator.id}
-        FOR UPDATE
+        FOR UPDATE NOWAIT
       `;
 
       const ticket = await tx.ticket.findUnique({
@@ -565,8 +739,16 @@ async function processCheckIn(input: ProcessCheckInInput): Promise<CheckInResult
         },
         select: {
           id: true,
+          eventId: true,
+          qrToken: true,
+          issuedAt: true,
           ticketClassId: true,
           status: true,
+          order: {
+            select: {
+              buyerUserId: true,
+            },
+          },
           attendee: {
             select: {
               id: true,
@@ -605,6 +787,35 @@ async function processCheckIn(input: ProcessCheckInInput): Promise<CheckInResult
           select: checkInEventSelect,
         });
       };
+
+      if (verifiedQrPayload) {
+        if (ticket.id !== verifiedQrPayload.ticketId) {
+          return createCheckInRecord(CheckInStatus.REJECTED, "qr_ticket_mismatch");
+        }
+
+        if (ticket.eventId !== verifiedQrPayload.eventId) {
+          return createCheckInRecord(CheckInStatus.REJECTED, "qr_event_mismatch");
+        }
+
+        if (ticket.order.buyerUserId !== verifiedQrPayload.buyerId) {
+          return createCheckInRecord(CheckInStatus.REJECTED, "qr_buyer_mismatch");
+        }
+
+        if (input.lookup.qrToken && ticket.qrToken !== input.lookup.qrToken) {
+          return createCheckInRecord(CheckInStatus.REJECTED, "qr_token_mismatch");
+        }
+
+        const boughtAtDeltaMs = Math.abs(
+          ticket.issuedAt.getTime() - verifiedQrPayload.boughtAt.getTime(),
+        );
+
+        if (boughtAtDeltaMs > 1000) {
+          return createCheckInRecord(
+            CheckInStatus.REJECTED,
+            "qr_purchase_timestamp_mismatch",
+          );
+        }
+      }
 
       if (ticket.status === TicketStatus.USED) {
         return createCheckInRecord(
@@ -690,6 +901,69 @@ async function processCheckIn(input: ProcessCheckInInput): Promise<CheckInResult
       }
     }
 
+    if (isTicketRowLockUnavailable(error)) {
+      let duplicateRecord: CheckInRecord;
+
+      try {
+        duplicateRecord = await prisma.checkInEvent.create({
+          data: {
+            ticketId: ticketLocator.id,
+            eventId: input.eventId,
+            gateId: input.gateId,
+            scannedBy: input.scannedBy,
+            mode: input.mode,
+            status: CheckInStatus.DUPLICATE,
+            reason: "verification_in_progress",
+            deviceId: input.deviceId,
+            clientScanId: input.clientScanId,
+            scannedAt: input.scannedAt,
+            syncedAt: input.mode === CheckInMode.OFFLINE ? now() : undefined,
+          },
+          select: checkInEventSelect,
+        });
+      } catch (duplicateError) {
+        if (input.clientScanId && isClientScanUniqueViolation(duplicateError)) {
+          const dedupedRecord = await findByClientScanId(
+            input.eventId,
+            input.clientScanId,
+          );
+
+          if (dedupedRecord) {
+            return toCheckInResult(dedupedRecord, input.manualOverride);
+          }
+        }
+
+        throw duplicateError;
+      }
+
+      await writeAuditEvent({
+        actorId: input.scannedBy,
+        action: "checkin.scan.duplicate",
+        scopeType: ScopeType.EVENT,
+        scopeId: input.eventId,
+        targetType: "Ticket",
+        targetId: duplicateRecord.ticket.id,
+        newValue: {
+          checkInEventId: duplicateRecord.id,
+          gateId: input.gateId,
+          status: duplicateRecord.status,
+          reason: duplicateRecord.reason,
+          mode: duplicateRecord.mode,
+          scannedAt: duplicateRecord.scannedAt.toISOString(),
+          ticketStatus: duplicateRecord.ticket.status,
+          ticketClassId: duplicateRecord.ticket.ticketClassId,
+          deviceId: input.deviceId,
+          clientScanId: input.clientScanId,
+          manualOverride: input.manualOverride,
+        },
+      });
+
+      const result = toCheckInResult(duplicateRecord, input.manualOverride);
+      void publishCheckInRealtimeUpdates(input.eventId, input.gateId, result);
+
+      return result;
+    }
+
     throw error;
   }
 }
@@ -700,6 +974,10 @@ export function parseCheckInScanInput(payload: unknown): CheckInScanInput {
   return {
     qrToken: parsed.qrToken,
     gateId: parsed.gateId,
+    ticketId: normalizeOptionalText(parsed.ticketId),
+    buyerId: normalizeOptionalText(parsed.buyerId),
+    eventId: normalizeOptionalText(parsed.eventId),
+    boughtAt: parsed.boughtAt?.toISOString(),
     scannedAt: parsed.scannedAt,
     mode: parsed.mode ?? CheckInMode.ONLINE,
     deviceId: normalizeOptionalText(parsed.deviceId),
@@ -736,6 +1014,9 @@ export function parseOfflineCheckInSyncInput(
       mode: scan.mode ?? CheckInMode.OFFLINE,
       ticketId: normalizeOptionalText(scan.ticketId),
       qrToken: normalizeOptionalText(scan.qrToken),
+      buyerId: normalizeOptionalText(scan.buyerId),
+      eventId: normalizeOptionalText(scan.eventId),
+      boughtAt: scan.boughtAt?.toISOString(),
       manualOverride: scan.manualOverride ?? false,
       reason: normalizeOptionalText(scan.reason),
     })),
@@ -783,7 +1064,14 @@ export async function scanTicketAtGate(
     deviceId: parsedInput.deviceId,
     clientScanId: parsedInput.clientScanId,
     lookup: {
+      ticketId: parsedInput.ticketId,
       qrToken: parsedInput.qrToken,
+    },
+    qrClaims: {
+      ticketId: parsedInput.ticketId,
+      buyerId: parsedInput.buyerId,
+      eventId: parsedInput.eventId,
+      boughtAt: parsedInput.boughtAt ? new Date(parsedInput.boughtAt) : undefined,
     },
     allowGatePolicyBypass: false,
     manualOverride: false,
@@ -899,6 +1187,12 @@ export async function syncOfflineCheckIns(
         lookup: {
           ticketId: scan.ticketId,
           qrToken: scan.qrToken,
+        },
+        qrClaims: {
+          ticketId: scan.ticketId,
+          buyerId: scan.buyerId,
+          eventId: scan.eventId,
+          boughtAt: scan.boughtAt ? new Date(scan.boughtAt) : undefined,
         },
         allowGatePolicyBypass: Boolean(scan.manualOverride),
         manualReason: scan.manualOverride ? scan.reason : undefined,

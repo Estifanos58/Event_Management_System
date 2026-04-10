@@ -1,7 +1,9 @@
 import { notFound } from "next/navigation";
+import QRCode from "qrcode";
 import { TicketActions } from "@/components/attendee/ticket-actions";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { prisma } from "@/core/db/prisma";
+import { decodeTicketQrPayload } from "@/domains/checkin/qr-payload";
 import { requireDashboardSnapshot } from "../../../_lib/access";
 
 type AttendeeTicketDetailPageProps = {
@@ -47,6 +49,7 @@ export default async function AttendeeTicketDetailPage({ params }: AttendeeTicke
       order: {
         select: {
           id: true,
+          buyerUserId: true,
           status: true,
           totalAmount: true,
           currency: true,
@@ -96,6 +99,13 @@ export default async function AttendeeTicketDetailPage({ params }: AttendeeTicke
     notFound();
   }
 
+  const qrDataUrl = await QRCode.toDataURL(ticket.qrToken, {
+    width: 260,
+    margin: 1,
+    errorCorrectionLevel: "M",
+  }).catch(() => null);
+  const decodedQrPayload = decodeTicketQrPayload(ticket.qrToken);
+
   return (
     <div className="space-y-6">
       <Card>
@@ -126,6 +136,50 @@ export default async function AttendeeTicketDetailPage({ params }: AttendeeTicke
             <p className="text-xs uppercase tracking-[0.12em] text-gray-500">Issued</p>
             <p className="mt-1 font-medium text-gray-900">{ticket.issuedAt.toLocaleString()}</p>
           </article>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Scan QR</CardTitle>
+          <CardDescription>
+            Present this QR to staff at gate entry for verification.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 lg:grid-cols-[300px_1fr]">
+          <div className="flex items-center justify-center rounded-xl border border-gray-200 bg-white p-4">
+            {qrDataUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={qrDataUrl} alt={`Ticket ${ticket.id} QR`} className="h-64 w-64" />
+            ) : (
+              <p className="text-sm text-gray-500">Unable to render QR code right now.</p>
+            )}
+          </div>
+
+          <div className="space-y-2 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+            <p>
+              <span className="font-semibold text-gray-900">Ticket ID:</span> {ticket.id}
+            </p>
+            <p>
+              <span className="font-semibold text-gray-900">Event ID:</span> {ticket.event.id}
+            </p>
+            <p>
+              <span className="font-semibold text-gray-900">Buyer ID:</span> {ticket.order.buyerUserId}
+            </p>
+            <p>
+              <span className="font-semibold text-gray-900">Bought at:</span>{" "}
+              {ticket.issuedAt.toLocaleString()}
+            </p>
+            {decodedQrPayload ? (
+              <p className="text-xs text-gray-500">
+                Payload version {decodedQrPayload.version} verified for local display.
+              </p>
+            ) : (
+              <p className="text-xs text-rose-600">
+                QR payload cannot be decoded in this view.
+              </p>
+            )}
+          </div>
         </CardContent>
       </Card>
 

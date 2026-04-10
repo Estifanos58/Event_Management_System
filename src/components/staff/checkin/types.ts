@@ -46,6 +46,9 @@ export type OfflineQueuedScan = {
   reason?: string;
   ticketId?: string;
   qrToken?: string;
+  buyerId?: string;
+  eventId?: string;
+  boughtAt?: string;
 };
 
 export type SyncResultItem = {

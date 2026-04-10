@@ -181,7 +181,14 @@ export function StaffCheckInOpsConsole({
   }
 
   const scanMutation = useMutation({
-    mutationFn: async (input: { qrToken: string; gateId: string }) => {
+    mutationFn: async (input: {
+      qrToken: string;
+      gateId: string;
+      ticketId?: string;
+      buyerId?: string;
+      eventId?: string;
+      boughtAt?: string;
+    }) => {
       const payload: OfflineQueuedScan = {
         clientScanId:
           typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -189,6 +196,10 @@ export function StaffCheckInOpsConsole({
             : `scan-${Date.now()}`,
         gateId: input.gateId,
         qrToken: input.qrToken,
+        ticketId: input.ticketId,
+        buyerId: input.buyerId,
+        eventId: input.eventId,
+        boughtAt: input.boughtAt,
         scannedAt: new Date().toISOString(),
         deviceId,
         manualOverride: false,
@@ -208,6 +219,10 @@ export function StaffCheckInOpsConsole({
           body: JSON.stringify({
             qrToken: input.qrToken,
             gateId: input.gateId,
+            ticketId: input.ticketId,
+            buyerId: input.buyerId,
+            eventId: input.eventId,
+            boughtAt: input.boughtAt,
             clientScanId: payload.clientScanId,
             deviceId,
           }),
@@ -232,9 +247,17 @@ export function StaffCheckInOpsConsole({
         return;
       }
 
+      if (
+        result.result.status === "DUPLICATE"
+        && result.result.reason === "verification_in_progress"
+      ) {
+        toast.info("This QR is currently being verified by another scanner.");
+      } else {
+        toast.success(`Scan ${result.result.status.toLowerCase()}.`);
+      }
+
       setRecentResults((previous) => [result.result, ...previous].slice(0, 20));
       void metricsQuery.refetch();
-      toast.success(`Scan ${result.result.status.toLowerCase()}.`);
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "Scan failed.");
@@ -361,6 +384,9 @@ export function StaffCheckInOpsConsole({
             mode: "OFFLINE",
             ticketId: scan.ticketId,
             qrToken: scan.qrToken,
+            buyerId: scan.buyerId,
+            eventId: scan.eventId,
+            boughtAt: scan.boughtAt,
             manualOverride: scan.manualOverride,
             reason: scan.reason,
           })),

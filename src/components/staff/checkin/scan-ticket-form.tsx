@@ -1,15 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { decodeTicketQrPayload } from "@/domains/checkin/qr-payload";
 import type { StaffGateOption } from "@/components/staff/checkin/types";
 
 type ScanTicketFormProps = {
   gates: StaffGateOption[];
   disabled?: boolean;
-  onSubmit: (input: { qrToken: string; gateId: string }) => Promise<void> | void;
+  onSubmit: (input: {
+    qrToken: string;
+    gateId: string;
+    ticketId?: string;
+    buyerId?: string;
+    eventId?: string;
+    boughtAt?: string;
+  }) => Promise<void> | void;
 };
 
 type BarcodeDetectorResult = {
@@ -47,6 +55,16 @@ export function ScanTicketForm({ gates, disabled = false, onSubmit }: ScanTicket
   const streamRef = useRef<MediaStream | null>(null);
   const detectorRef = useRef<BarcodeDetectorLike | null>(null);
   const rafIdRef = useRef<number | null>(null);
+
+  const decodedPayload = useMemo(() => {
+    const value = qrToken.trim();
+
+    if (!value) {
+      return null;
+    }
+
+    return decodeTicketQrPayload(value);
+  }, [qrToken]);
 
   const stopCamera = useCallback(() => {
     if (rafIdRef.current !== null) {
@@ -165,6 +183,10 @@ export function ScanTicketForm({ gates, disabled = false, onSubmit }: ScanTicket
       await onSubmit({
         qrToken: trimmedQr,
         gateId,
+        ticketId: decodedPayload?.ticketId,
+        buyerId: decodedPayload?.buyerId,
+        eventId: decodedPayload?.eventId,
+        boughtAt: decodedPayload?.boughtAt,
       });
       setQrToken("");
     } finally {
@@ -215,6 +237,16 @@ export function ScanTicketForm({ gates, disabled = false, onSubmit }: ScanTicket
           </Button>
         </div>
       </form>
+
+      {decodedPayload ? (
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+          <p className="font-semibold uppercase tracking-widest text-gray-500">Decoded QR</p>
+          <p className="mt-1">Ticket: {decodedPayload.ticketId}</p>
+          <p>Buyer: {decodedPayload.buyerId}</p>
+          <p>Event: {decodedPayload.eventId}</p>
+          <p>Bought at: {new Date(decodedPayload.boughtAt).toLocaleString()}</p>
+        </div>
+      ) : null}
 
       {cameraSupported ? (
         <div className="space-y-2 rounded-xl border border-gray-200 bg-gray-50 p-3">

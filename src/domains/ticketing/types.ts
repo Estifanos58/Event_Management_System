@@ -76,6 +76,7 @@ export type TicketingMaintenanceResult = {
   expiredTransfers: number;
   expiredWaitlistClaims: number;
   reconciledPaymentAttempts: number;
+  rotatedLegacyQrTokens: number;
 };
 
 export type PaymentReconciliationResult = {
