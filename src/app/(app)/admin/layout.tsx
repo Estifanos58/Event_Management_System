@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { hasAdminAccess, requireDashboardSnapshot } from "../_lib/access";
 
+export const dynamic = "force-dynamic";
+
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const snapshot = await requireDashboardSnapshot();
   const navLinkClass =
