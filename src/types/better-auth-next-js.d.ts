@@ -1,13 +1,7 @@
 declare module "better-auth/next-js" {
-  import type { betterAuth } from "better-auth";
+  export function nextCookies(): any;
 
-  type BetterAuthInstance = ReturnType<typeof betterAuth>;
-  type BetterAuthOptions = Parameters<typeof betterAuth>[0];
-  type BetterAuthPlugin = NonNullable<BetterAuthOptions["plugins"]>[number];
-
-  export function nextCookies(): BetterAuthPlugin;
-
-  export function toNextJsHandler(auth: BetterAuthInstance): {
+  export function toNextJsHandler(auth: any): {
     GET: (request: Request) => Response | Promise<Response>;
     POST: (request: Request) => Response | Promise<Response>;
     PUT: (request: Request) => Response | Promise<Response>;
