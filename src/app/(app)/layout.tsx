@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ScopeType } from "@prisma/client";
 import { signOutAction } from "@/domains/identity/actions";
 import {
   LayoutDashboard,
@@ -21,6 +22,19 @@ import {
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const snapshot = await requireDashboardSnapshot();
+
+  const organizationContext = snapshot.contexts.find(
+    (context) => context.type === ScopeType.ORGANIZATION,
+  );
+  const organizationAction = organizationContext
+    ? {
+        href: "/organizer/dashboard",
+        label: organizationContext.label,
+      }
+    : {
+        href: "/onboarding",
+        label: "Create Organization",
+      };
 
   const showOrganizer = hasOrganizerAccess(snapshot);
   const showStaff = hasStaffAccess(snapshot);
@@ -56,6 +70,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             className="group flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-orange-50 hover:text-orange-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
           >
             <LayoutDashboard className="h-4 w-4" /> My Tickets
+          </Link>
+          <Link
+            href={organizationAction.href}
+            className="group flex items-center gap-3 rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-sm font-semibold text-orange-700 transition-colors hover:bg-orange-100 hover:text-orange-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+          >
+            <Calendar className="h-4 w-4" /> {organizationAction.label}
           </Link>
 
           {showOrganizer || showStaff || showAdmin ? <div className="pt-4" /> : null}
