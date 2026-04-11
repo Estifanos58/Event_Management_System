@@ -1,5 +1,6 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { prisma } from "@/core/db/prisma";
+import { getMyOrderPaymentStatus } from "@/domains/ticketing/service";
 import { requireDashboardSnapshot } from "../../_lib/access";
 
 type AttendeeOrder = {
@@ -18,6 +19,7 @@ type AttendeeOrder = {
     id: string;
     status: string;
     provider: string;
+    providerReference: string | null;
     updatedAt: Date;
   }>;
   tickets: Array<{
@@ -26,19 +28,15 @@ type AttendeeOrder = {
   }>;
 };
 
-function formatMoney(amount: number, currency: string) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-  }).format(amount);
-}
+const PENDING_CHAPA_STATUSES = new Set([
+  "INITIATED",
+  "PROCESSING",
+  "REQUIRES_ACTION",
+  "AUTHORIZED",
+]);
 
-export default async function AttendeeOrdersPage() {
-  const snapshot = await requireDashboardSnapshot();
-  const userId = snapshot.session.user.id;
-
-  const orders = (await prisma.order.findMany({
+async function loadAttendeeOrders(userId: string) {
+  return (await prisma.order.findMany({
     where: {
       buyerUserId: userId,
     },
@@ -56,6 +54,7 @@ export default async function AttendeeOrdersPage() {
           id: true,
           status: true,
           provider: true,
+          providerReference: true,
           updatedAt: true,
         },
         orderBy: {
@@ -76,6 +75,48 @@ export default async function AttendeeOrdersPage() {
     },
     take: 80,
   })) as AttendeeOrder[];
+}
+
+function formatMoney(amount: number, currency: string) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 2,
+  }).format(amount);
+}
+
+export default async function AttendeeOrdersPage() {
+  const snapshot = await requireDashboardSnapshot();
+  const userId = snapshot.session.user.id;
+
+  let orders = await loadAttendeeOrders(userId);
+
+  const ordersNeedingSync = orders.filter((order) => {
+    const latestAttempt = order.paymentAttempts[0];
+
+    if (!latestAttempt || latestAttempt.provider !== "CHAPA") {
+      return false;
+    }
+
+    if (order.status === "COMPLETED") {
+      return false;
+    }
+
+    return (
+      Boolean(latestAttempt.providerReference) &&
+      PENDING_CHAPA_STATUSES.has(latestAttempt.status)
+    );
+  });
+
+  if (ordersNeedingSync.length > 0) {
+    await Promise.allSettled(
+      ordersNeedingSync.slice(0, 12).map((order) =>
+        getMyOrderPaymentStatus(order.event.id, order.id),
+      ),
+    );
+
+    orders = await loadAttendeeOrders(userId);
+  }
 
   return (
     <div className="space-y-6">

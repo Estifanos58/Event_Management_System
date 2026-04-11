@@ -144,6 +144,8 @@ export async function signInAction(
     };
   }
 
+  let userId: string | null = null;
+
   try {
     const signInResult = await auth.api.signInEmail({
       headers: await authHeaders(),
@@ -152,7 +154,8 @@ export async function signInAction(
         password: parsed.data.password,
       },
     });
-    const userId = resolveAuthUserId(signInResult);
+
+    userId = resolveAuthUserId(signInResult);
 
     if (!userId) {
       return {
@@ -161,11 +164,11 @@ export async function signInAction(
     }
 
     await ensurePersonalRoleBinding(userId);
-
-    redirect("/attendee/dashboard");
   } catch (error) {
     return actionError(error);
   }
+
+  redirect("/attendee/dashboard");
 }
 
 export async function signUpAction(
@@ -184,12 +187,15 @@ export async function signUpAction(
     };
   }
 
+  let userId: string | null = null;
+
   try {
     const signUpResult = await auth.api.signUpEmail({
       headers: await authHeaders(),
       body: parsed.data,
     });
-    const userId = resolveAuthUserId(signUpResult);
+
+    userId = resolveAuthUserId(signUpResult);
 
     if (!userId) {
       return {
@@ -215,11 +221,11 @@ export async function signUpAction(
         error: error instanceof Error ? error.message : "unknown",
       });
     });
-
-    redirect("/attendee/dashboard");
   } catch (error) {
     return actionError(error);
   }
+
+  redirect("/attendee/dashboard");
 }
 
 export async function signOutAction(): Promise<void> {

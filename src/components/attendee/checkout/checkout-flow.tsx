@@ -304,9 +304,10 @@ export function CheckoutFlow({
       setPayment(nextPayment);
 
       if (nextPayment.checkoutUrl) {
-        toast.success("Payment initialized. Continue in the payment window.");
+        toast.success("Payment initialized. Redirecting to Chapa checkout...");
+        window.location.assign(nextPayment.checkoutUrl);
       } else {
-        toast.success("Payment initialized.");
+        toast.error("Payment was initialized but no checkout URL was returned.");
       }
     },
     onError: (error) => {
@@ -388,9 +389,46 @@ export function CheckoutFlow({
       return;
     }
 
-    void refreshPaymentStatus(orderIdFromReturn, {
-      silent: false,
+    ["trx_ref", "tx_ref", "ref_id", "status"].forEach((key) => {
+      params.delete(key);
     });
+
+    const nextQuery = params.toString();
+    const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}`;
+    window.history.replaceState(null, "", nextUrl);
+
+    let cancelled = false;
+    let timeoutId: number | null = null;
+    let attemptCount = 0;
+    const maxAttempts = 12;
+
+    const pollStatus = async (silent: boolean) => {
+      const snapshot = await refreshPaymentStatus(orderIdFromReturn, {
+        silent,
+      });
+
+      if (!snapshot || snapshot.isFinal || cancelled) {
+        return;
+      }
+
+      if (attemptCount >= maxAttempts) {
+        return;
+      }
+
+      attemptCount += 1;
+      timeoutId = window.setTimeout(() => {
+        void pollStatus(true);
+      }, 2500);
+    };
+
+    void pollStatus(false);
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
   }, [refreshPaymentStatus]);
 
   const reservationTotal = reservation
@@ -546,7 +584,7 @@ export function CheckoutFlow({
         <CardHeader>
           <CardTitle>3. Initialize Payment</CardTitle>
           <CardDescription>
-            Initialize provider checkout for the order and continue to the payment URL.
+            Initialize provider checkout for the order and get redirected to Chapa immediately.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -581,7 +619,7 @@ export function CheckoutFlow({
                   rel="noreferrer"
                   className="mt-2 inline-block font-medium text-orange-500"
                 >
-                  Continue to payment provider
+                  If redirect did not start, continue to payment provider
                 </a>
               ) : (
                 <p className="mt-2">No checkout URL was returned for this attempt.</p>

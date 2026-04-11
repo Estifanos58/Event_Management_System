@@ -233,6 +233,17 @@ function isPendingPaymentStatus(status: string): boolean {
   return ["PENDING", "PROCESSING", "INITIATED"].includes(status);
 }
 
+function isTerminalPaymentAttemptStatus(status: PaymentAttemptStatus): boolean {
+  const terminalStatuses: PaymentAttemptStatus[] = [
+    PaymentAttemptStatus.CAPTURED,
+    PaymentAttemptStatus.FAILED,
+    PaymentAttemptStatus.VOIDED,
+    PaymentAttemptStatus.REFUNDED,
+  ];
+
+  return terminalStatuses.includes(status);
+}
+
 function normalizeProviderEventId(value?: string | null) {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
@@ -1236,39 +1247,83 @@ export async function getMyOrderPaymentStatus(
     "payments.status.mine.read",
   );
 
-  const order = await prisma.order.findFirst({
-    where: {
-      id: orderId,
-      eventId,
-      buyerUserId: authz.session.user.id,
-    },
-    select: {
-      id: true,
-      status: true,
-      totalAmount: true,
-      currency: true,
-      completedAt: true,
-      updatedAt: true,
-      paymentAttempts: {
-        orderBy: {
-          updatedAt: "desc",
-        },
-        take: 1,
-        select: {
-          id: true,
-          status: true,
-          provider: true,
-          providerReference: true,
-          checkoutUrl: true,
-          failureCode: true,
-          updatedAt: true,
+  const loadOrderStatusRecord = () =>
+    prisma.order.findFirst({
+      where: {
+        id: orderId,
+        eventId,
+        buyerUserId: authz.session.user.id,
+      },
+      select: {
+        id: true,
+        status: true,
+        totalAmount: true,
+        currency: true,
+        completedAt: true,
+        updatedAt: true,
+        paymentAttempts: {
+          orderBy: {
+            updatedAt: "desc",
+          },
+          take: 1,
+          select: {
+            id: true,
+            status: true,
+            provider: true,
+            providerReference: true,
+            checkoutUrl: true,
+            failureCode: true,
+            updatedAt: true,
+          },
         },
       },
-    },
-  });
+    });
+
+  let order = await loadOrderStatusRecord();
 
   if (!order) {
     throw new TicketingDomainError(404, "RESERVATION_NOT_FOUND", "Order not found.");
+  }
+
+  const shouldSynchronizeWithProvider = (() => {
+    const latestAttempt = order.paymentAttempts[0];
+
+    if (!latestAttempt) {
+      return false;
+    }
+
+    if (order.status === OrderStatus.COMPLETED) {
+      return false;
+    }
+
+    if (latestAttempt.provider !== "CHAPA" || !latestAttempt.providerReference) {
+      return false;
+    }
+
+    return !isTerminalPaymentAttemptStatus(latestAttempt.status);
+  })();
+
+  if (shouldSynchronizeWithProvider) {
+    const latestAttempt = order.paymentAttempts[0]!;
+
+    try {
+      await processChapaTransactionByReference(
+        latestAttempt.providerReference!,
+        latestAttempt.providerReference!,
+        {
+          source: "status_sync",
+          orderId,
+          paymentAttemptId: latestAttempt.id,
+        },
+      );
+
+      const refreshedOrder = await loadOrderStatusRecord();
+      if (refreshedOrder) {
+        order = refreshedOrder;
+      }
+    } catch {
+      // Ignore sync failures here; caller still receives the latest persisted snapshot.
+    }
   }
 
   const latestAttempt = order.paymentAttempts[0];
@@ -2322,28 +2377,21 @@ async function processChapaTransactionByReference(
 ): Promise<ChapaTransactionProcessResult> {
   const normalizedProviderEventId = normalizeProviderEventId(providerEventId) ?? txRef;
 
-  const existingAttempt = await prisma.paymentAttempt.findFirst({
+  const existingAttemptByEventId = await prisma.paymentAttempt.findFirst({
     where: {
       provider: "CHAPA",
       providerEventId: normalizedProviderEventId,
     },
   });
 
-  if (existingAttempt) {
-    return {
-      idempotent: true,
-      paymentAttemptId: existingAttempt.id,
-      orderId: existingAttempt.orderId,
-      status: existingAttempt.status,
-    };
-  }
-
-  const attempt = await prisma.paymentAttempt.findFirst({
-    where: {
-      provider: "CHAPA",
-      providerReference: txRef,
-    },
-  });
+  const attempt =
+    existingAttemptByEventId ??
+    (await prisma.paymentAttempt.findFirst({
+      where: {
+        provider: "CHAPA",
+        providerReference: txRef,
+      },
+    }));
 
   if (!attempt) {
     throw new TicketingDomainError(
@@ -2351,6 +2399,18 @@ async function processChapaTransactionByReference(
       "RESERVATION_NOT_FOUND",
       "Payment attempt not found for tx_ref.",
     );
+  }
+
+  if (
+    existingAttemptByEventId &&
+    isTerminalPaymentAttemptStatus(existingAttemptByEventId.status)
+  ) {
+    return {
+      idempotent: true,
+      paymentAttemptId: existingAttemptByEventId.id,
+      orderId: existingAttemptByEventId.orderId,
+      status: existingAttemptByEventId.status,
+    };
   }
 
   const persistedTraceContext = extractTraceContextFromMetadata(attempt.metadata);
