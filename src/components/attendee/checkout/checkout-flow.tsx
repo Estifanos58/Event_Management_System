@@ -561,7 +561,7 @@ export function CheckoutFlow({
               <div className="mt-2">
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="secondary"
                   onClick={() => {
                     if (!order) {
                       return;

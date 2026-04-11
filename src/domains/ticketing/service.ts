@@ -3138,7 +3138,7 @@ async function cancelExpiredChapaTransactions(eventId?: string) {
             callbackPayload: {
               source: "maintenance",
               cancellation,
-            } as Prisma.InputJsonValue,
+            } as unknown as Prisma.InputJsonValue,
           },
         });
 
