@@ -1,8 +1,12 @@
-import { NotificationChannel } from "@prisma/client";
+import { NotificationChannel, NotificationType, type Prisma } from "@prisma/client";
+import { sendEmail } from "@/core/email/sender";
+import { renderNotificationEmailTemplate } from "@/core/email/templates";
 
 type NotificationDispatchInput = {
+  type: NotificationType;
   subject?: string;
   content: string;
+  metadata?: Prisma.JsonValue;
   recipientAddress?: string;
   user: {
     id: string;
@@ -64,17 +68,32 @@ export async function dispatchNotificationChannel(
     if (!resolvedRecipientAddress || !resolvedRecipientAddress.includes("@")) {
       return {
         success: false,
-        provider: "INTERNAL_EMAIL",
+        provider: "GMAIL_SMTP",
         responseCode: "EMAIL_ADDRESS_MISSING",
         responseMessage: "Recipient email is unavailable.",
       };
     }
 
+    const rendered = await renderNotificationEmailTemplate({
+      type: input.type,
+      subject: input.subject,
+      content: input.content,
+      metadata: input.metadata,
+      recipient: input.user,
+    });
+
+    const sendResult = await sendEmail({
+      to: resolvedRecipientAddress,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+    });
+
     return {
-      success: true,
-      provider: "INTERNAL_EMAIL",
-      responseCode: "EMAIL_QUEUED",
-      responseMessage: "Email notification queued.",
+      success: sendResult.success,
+      provider: sendResult.provider,
+      responseCode: sendResult.responseCode,
+      responseMessage: sendResult.responseMessage,
       resolvedRecipientAddress,
     };
   }

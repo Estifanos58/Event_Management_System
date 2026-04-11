@@ -1,6 +1,7 @@
 import {
   EventSessionStatus,
   EventStatus,
+  NotificationType,
   OrderStatus,
   PaymentAttemptStatus,
   PayoutStatus,
@@ -15,10 +16,12 @@ import {
 import { z } from "zod";
 import { writeAuditEvent } from "@/core/audit/audit";
 import { prisma } from "@/core/db/prisma";
+import { env } from "@/core/env";
 import {
   createAccessContext,
   requirePermission,
 } from "@/domains/identity/guards";
+import { enqueueSystemNotification } from "@/domains/notifications/service";
 import { TicketingDomainError } from "@/domains/ticketing/errors";
 import type {
   CreateSettlementInput,
@@ -774,8 +777,14 @@ export async function executeOrderRefund(
     },
     select: {
       id: true,
+      buyerUserId: true,
       totalAmount: true,
       currency: true,
+      event: {
+        select: {
+          title: true,
+        },
+      },
       paymentAttempts: {
         where: {
           status: {
@@ -934,6 +943,34 @@ export async function executeOrderRefund(
     },
   });
 
+  void enqueueSystemNotification({
+    eventId,
+    userIds: [order.buyerUserId],
+    type: NotificationType.REFUND_COMPLETED,
+    subject: `Refund processed for ${order.event.title}`,
+    content: "Your refund has been completed and reflected in your payment record.",
+    idempotencyKeyBase: `txn:refund-completed:${result.refund.id}`,
+    metadata: {
+      refundId: result.refund.id,
+      orderId,
+      eventTitle: order.event.title,
+      amount: requestedAmount,
+      currency: order.currency,
+      reason: parsedInput.reason,
+      policyWindow: policy.policyWindow,
+      totalRefunded: result.totalRefunded,
+      fullyRefunded: result.fullyRefunded,
+    },
+    maxAttempts: 6,
+  }).catch((error) => {
+    console.warn("Failed to enqueue refund notification", {
+      eventId,
+      orderId,
+      refundId: result.refund.id,
+      error: error instanceof Error ? error.message : "unknown",
+    });
+  });
+
   return {
     refund: result.refund,
     policy,
@@ -962,6 +999,7 @@ export async function recordPaymentDispute(
     },
     select: {
       id: true,
+      buyerUserId: true,
       paymentAttempts: {
         orderBy: {
           createdAt: "desc",
@@ -1047,6 +1085,33 @@ export async function recordPaymentDispute(
       evidence: parsedInput.evidence,
     },
   });
+
+  if (parsedInput.restrictTicketAccess && result.restrictedTicketCount > 0) {
+    void enqueueSystemNotification({
+      eventId,
+      userIds: [order.buyerUserId],
+      type: NotificationType.USER_RESTRICTED,
+      subject: `Ticket access restricted for ${event.title}`,
+      content:
+        "Ticket access was restricted due to a payment dispute under active review.",
+      idempotencyKeyBase: `txn:payment-dispute-restriction:${result.riskCase.id}`,
+      metadata: {
+        action: "PAYMENT_DISPUTE_TICKET_RESTRICTION",
+        eventTitle: event.title,
+        referenceId: result.riskCase.id,
+        reason: parsedInput.reason,
+        supportUrl: `${env.NEXT_PUBLIC_APP_URL}/support`,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue ticket restriction notification", {
+        eventId,
+        orderId,
+        riskCaseId: result.riskCase.id,
+        error: error instanceof Error ? error.message : "unknown",
+      });
+    });
+  }
 
   return {
     riskCase: result.riskCase,

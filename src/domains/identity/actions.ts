@@ -1,6 +1,6 @@
 "use server";
 
-import { Role, ScopeType } from "@prisma/client";
+import { NotificationType, Role, ScopeType } from "@prisma/client";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { writeAuditEvent } from "@/core/audit/audit";
@@ -15,6 +15,7 @@ import {
   getPermissions,
   listUserContexts,
 } from "@/domains/identity/permissions";
+import { enqueueSystemNotification } from "@/domains/notifications/service";
 import {
   ROLE_DEFAULT_PERMISSIONS,
   type AccessContext,
@@ -160,6 +161,7 @@ export async function signInAction(
     }
 
     await ensurePersonalRoleBinding(userId);
+
     redirect("/attendee/dashboard");
   } catch (error) {
     return actionError(error);
@@ -196,6 +198,24 @@ export async function signUpAction(
     }
 
     await ensurePersonalRoleBinding(userId);
+
+    await enqueueSystemNotification({
+      userIds: [userId],
+      type: NotificationType.WELCOME,
+      subject: "Welcome to Dinkinesh - EEMS",
+      content: "Your account is active and ready for event discovery and ticketing.",
+      idempotencyKeyBase: `txn:welcome:${userId}`,
+      metadata: {
+        recipientName: parsed.data.name,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue welcome notification", {
+        userId,
+        error: error instanceof Error ? error.message : "unknown",
+      });
+    });
+
     redirect("/attendee/dashboard");
   } catch (error) {
     return actionError(error);
@@ -286,6 +306,28 @@ export async function onboardOrganizationAction(
       newValue: {
         displayName: organization.displayName,
       },
+    });
+
+    await enqueueSystemNotification({
+      orgId: organization.id,
+      userIds: [session.user.id],
+      type: NotificationType.ORGANIZATION_CREATED,
+      subject: `Organization created: ${organization.displayName}`,
+      content: "Your organizer workspace was provisioned successfully.",
+      idempotencyKeyBase: `txn:organization-created:${organization.id}:${session.user.id}`,
+      metadata: {
+        displayName: organization.displayName,
+        legalName: organization.legalName,
+        defaultCurrency: organization.defaultCurrency,
+        region: organization.region,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue organization created notification", {
+        organizationId: organization.id,
+        actorId: session.user.id,
+        error: error instanceof Error ? error.message : "unknown",
+      });
     });
 
     redirect("/organizer/dashboard");

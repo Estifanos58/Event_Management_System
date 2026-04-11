@@ -2,6 +2,7 @@ import {
   CheckInMode,
   CheckInStatus,
   EventStatus,
+  NotificationType,
   Prisma,
   RiskSeverity,
   ScopeType,
@@ -35,6 +36,7 @@ import {
   requirePermission,
 } from "@/domains/identity/guards";
 import { canAccess } from "@/domains/identity/permissions";
+import { enqueueSystemNotification } from "@/domains/notifications/service";
 import type { PermissionResolution } from "@/domains/identity/types";
 
 const scanPayloadSchema = z.object({
@@ -886,6 +888,46 @@ async function processCheckIn(input: ProcessCheckInInput): Promise<CheckInResult
     });
 
     const result = toCheckInResult(record, input.manualOverride);
+
+    if (record.status === CheckInStatus.ACCEPTED) {
+      const gate = await prisma.gate.findUnique({
+        where: {
+          id: input.gateId,
+        },
+        select: {
+          name: true,
+          event: {
+            select: {
+              title: true,
+            },
+          },
+        },
+      });
+
+      void enqueueSystemNotification({
+        eventId: input.eventId,
+        userIds: [record.ticket.attendee.id],
+        type: NotificationType.CHECKIN_ACCEPTED,
+        subject: `Check-in confirmed for ${gate?.event.title ?? "your event"}`,
+        content: "Your ticket was checked in successfully.",
+        idempotencyKeyBase: `txn:checkin-accepted:${record.id}`,
+        metadata: {
+          eventTitle: gate?.event.title,
+          gateName: gate?.name,
+          scannedAt: record.scannedAt.toISOString(),
+          ticketClassName: record.ticket.ticketClassId,
+          checkInEventId: record.id,
+        },
+        maxAttempts: 6,
+      }).catch((error) => {
+        console.warn("Failed to enqueue check-in notification", {
+          eventId: input.eventId,
+          checkInEventId: record.id,
+          error: error instanceof Error ? error.message : "unknown",
+        });
+      });
+    }
+
     void publishCheckInRealtimeUpdates(input.eventId, input.gateId, result);
 
     return result;

@@ -11,6 +11,11 @@ const envSchema = z.object({
   CHAPA_SECRET_KEY: z.string().min(1, "CHAPA_SECRET_KEY is required"),
   CHAPA_WEBHOOK_SECRET: z.string().min(1, "CHAPA_WEBHOOK_SECRET is required"),
   CHAPA_BASE_URL: z.string().url("CHAPA_BASE_URL must be a valid URL"),
+  GMAIL_SMTP_USER: z.string().email("GMAIL_SMTP_USER must be a valid email address").optional(),
+  GMAIL_SMTP_APP_PASSWORD: z.string().min(1).optional(),
+  EMAIL_FROM_NAME: z.string().trim().min(1).default("Dinkinesh - EEMS"),
+  EMAIL_FROM_ADDRESS: z.string().email("EMAIL_FROM_ADDRESS must be a valid email address").optional(),
+  EMAIL_REPLY_TO: z.string().email("EMAIL_REPLY_TO must be a valid email address").optional(),
   SECURITY_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
   SECURITY_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(25),
   SECURITY_HIGH_RISK_RATE_LIMIT_MAX_REQUESTS: z.coerce
@@ -80,6 +85,11 @@ const parsed = envSchema.safeParse({
   CHAPA_SECRET_KEY: process.env.CHAPA_SECRET_KEY,
   CHAPA_WEBHOOK_SECRET: process.env.CHAPA_WEBHOOK_SECRET,
   CHAPA_BASE_URL: process.env.CHAPA_BASE_URL,
+  GMAIL_SMTP_USER: process.env.GMAIL_SMTP_USER,
+  GMAIL_SMTP_APP_PASSWORD: process.env.GMAIL_SMTP_APP_PASSWORD,
+  EMAIL_FROM_NAME: process.env.EMAIL_FROM_NAME,
+  EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS,
+  EMAIL_REPLY_TO: process.env.EMAIL_REPLY_TO,
   SECURITY_RATE_LIMIT_WINDOW_SECONDS: process.env.SECURITY_RATE_LIMIT_WINDOW_SECONDS,
   SECURITY_RATE_LIMIT_MAX_REQUESTS: process.env.SECURITY_RATE_LIMIT_MAX_REQUESTS,
   SECURITY_HIGH_RISK_RATE_LIMIT_MAX_REQUESTS:

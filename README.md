@@ -18,6 +18,26 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+## Email Configuration (Gmail SMTP)
+
+Transactional notifications are sent through Gmail SMTP.
+
+Add these environment variables before running the worker:
+
+```bash
+GMAIL_SMTP_USER=your-address@gmail.com
+GMAIL_SMTP_APP_PASSWORD=your-gmail-app-password
+EMAIL_FROM_NAME="Dinkinesh - EEMS"
+EMAIL_FROM_ADDRESS=your-address@gmail.com
+EMAIL_REPLY_TO=support@your-domain.com
+```
+
+Notes:
+
+- Use a Gmail App Password (not your normal account password).
+- Start the worker to process notification deliveries: `npm run worker`.
+- Notification emails are queued and retried using the `NotificationDelivery` pipeline.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More

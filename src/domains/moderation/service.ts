@@ -3,6 +3,7 @@ import {
   AbuseTargetType,
   EventStatus,
   EventVisibility,
+  NotificationType,
   Prisma,
   RiskSeverity,
   RiskStatus,
@@ -12,8 +13,10 @@ import {
 import { z } from "zod";
 import { writeAuditEvent } from "@/core/audit/audit";
 import { prisma } from "@/core/db/prisma";
+import { env } from "@/core/env";
 import { createAccessContext, requirePermission } from "@/domains/identity/guards";
 import { ModerationDomainError } from "@/domains/moderation/errors";
+import { enqueueSystemNotification } from "@/domains/notifications/service";
 import type {
   AbuseReportListQuery,
   ApplyModerationEnforcementInput,
@@ -227,6 +230,7 @@ async function loadEventModerationContext(eventId: string) {
     select: {
       id: true,
       orgId: true,
+      title: true,
       status: true,
       visibility: true,
       ticketSalesPaused: true,
@@ -1069,6 +1073,31 @@ export async function applyModerationEnforcement(
       updatedRiskCase: result.updatedRiskCase,
       metadata: toJsonValue(parsedInput.metadata),
     },
+  });
+
+  void enqueueSystemNotification({
+    orgId: event.orgId,
+    eventId,
+    userIds: [event.createdBy],
+    type: NotificationType.USER_RESTRICTED,
+    subject: `Moderation action applied to ${event.title}`,
+    content:
+      "A moderation enforcement action affected your event operations. Review details in your dashboard.",
+    idempotencyKeyBase: `txn:moderation-enforcement:${eventId}:${parsedInput.action}:${parsedInput.reportId ?? parsedInput.riskCaseId ?? "event"}`,
+    metadata: {
+      action: parsedInput.action,
+      eventTitle: event.title,
+      referenceId: parsedInput.reportId ?? parsedInput.riskCaseId ?? eventId,
+      reason: parsedInput.reason,
+      supportUrl: `${env.NEXT_PUBLIC_APP_URL}/support`,
+    },
+    maxAttempts: 6,
+  }).catch((error) => {
+    console.warn("Failed to enqueue moderation restriction notification", {
+      eventId,
+      action: parsedInput.action,
+      error: error instanceof Error ? error.message : "unknown",
+    });
   });
 
   return {

@@ -14,10 +14,12 @@ import { z } from "zod";
 import { writeAuditEvent } from "@/core/audit/audit";
 import { getServerSessionOrNull } from "@/core/auth/session";
 import { prisma } from "@/core/db/prisma";
+import { env } from "@/core/env";
 import { dispatchNotificationChannel } from "@/domains/notifications/adapters";
 import { NotificationDomainError } from "@/domains/notifications/errors";
 import type {
   EnqueueNotificationResult,
+  EnqueueSystemNotificationInput,
   EnqueueTransactionalNotificationInput,
   ListEventNotificationDeliveriesQuery,
   ListMyNotificationsQuery,
@@ -47,7 +49,6 @@ const DEFAULT_NOTIFICATION_PREFERENCES = {
 const CHANNEL_DEFAULTS_BY_TYPE: Record<NotificationType, NotificationChannel[]> = {
   [NotificationType.ORDER_CONFIRMATION]: [
     NotificationChannel.EMAIL,
-    NotificationChannel.IN_APP,
   ],
   [NotificationType.EVENT_REMINDER]: [
     NotificationChannel.EMAIL,
@@ -62,6 +63,18 @@ const CHANNEL_DEFAULTS_BY_TYPE: Record<NotificationType, NotificationChannel[]> 
     NotificationChannel.EMAIL,
     NotificationChannel.IN_APP,
   ],
+  [NotificationType.WELCOME]: [NotificationChannel.EMAIL],
+  [NotificationType.ORGANIZATION_CREATED]: [NotificationChannel.EMAIL],
+  [NotificationType.TICKET_TRANSFER_REQUESTED]: [NotificationChannel.EMAIL],
+  [NotificationType.TICKET_TRANSFER_UPDATED]: [NotificationChannel.EMAIL],
+  [NotificationType.TICKET_TRANSFER_RECEIVED]: [NotificationChannel.EMAIL],
+  [NotificationType.REFUND_COMPLETED]: [NotificationChannel.EMAIL],
+  [NotificationType.USER_RESTRICTED]: [NotificationChannel.EMAIL],
+  [NotificationType.STAFF_ASSIGNED]: [NotificationChannel.EMAIL],
+  [NotificationType.CHECKIN_ACCEPTED]: [NotificationChannel.EMAIL],
+  [NotificationType.WAITLIST_PROMOTED]: [NotificationChannel.EMAIL],
+  [NotificationType.PAYMENT_FAILED]: [NotificationChannel.EMAIL],
+  [NotificationType.EVENT_STATUS_CHANGED]: [NotificationChannel.EMAIL],
 };
 
 const organizerAnnouncementAudienceSchema = z.enum([
@@ -94,6 +107,21 @@ const enqueueTransactionalNotificationInputSchema = z.object({
   scheduledFor: z.string().datetime().optional(),
   metadata: z.unknown().optional(),
   maxAttempts: z.coerce.number().int().min(1).max(MAX_DELIVERY_ATTEMPTS).optional(),
+});
+
+const enqueueSystemNotificationInputSchema = z.object({
+  orgId: z.string().trim().min(1).max(120).optional(),
+  eventId: z.string().trim().min(1).max(120).optional(),
+  userIds: z.array(z.string().trim().min(1).max(120)).min(1).max(20_000),
+  type: z.enum(NotificationType),
+  subject: z.string().trim().max(240).optional(),
+  content: z.string().trim().min(1).max(8_000),
+  channels: z.array(z.enum(NotificationChannel)).min(1).max(4).optional(),
+  idempotencyKeyBase: z.string().trim().min(8).max(200),
+  metadata: z.unknown().optional(),
+  scheduledFor: z.union([z.string().datetime(), z.date()]).optional(),
+  maxAttempts: z.coerce.number().int().min(1).max(MAX_DELIVERY_ATTEMPTS).optional(),
+  createdBy: z.string().trim().min(1).max(120).optional(),
 });
 
 const sendOrganizerAnnouncementInputSchema = z
@@ -246,6 +274,28 @@ function parseEnqueueTransactionalNotificationInput(
     scheduledFor: parsed.scheduledFor ? new Date(parsed.scheduledFor) : undefined,
     metadata: parsed.metadata,
     maxAttempts: parsed.maxAttempts ?? 6,
+  };
+}
+
+function parseEnqueueSystemNotificationInput(input: EnqueueSystemNotificationInput) {
+  const parsed = enqueueSystemNotificationInputSchema.parse(input);
+
+  return {
+    orgId: normalizeOptionalText(parsed.orgId),
+    eventId: normalizeOptionalText(parsed.eventId),
+    userIds: Array.from(new Set(parsed.userIds)),
+    type: parsed.type,
+    subject: normalizeOptionalText(parsed.subject),
+    content: parsed.content,
+    channels: parsed.channels ? dedupeChannels(parsed.channels) : undefined,
+    idempotencyKeyBase: parsed.idempotencyKeyBase,
+    metadata: parsed.metadata,
+    scheduledFor:
+      typeof parsed.scheduledFor === "string"
+        ? new Date(parsed.scheduledFor)
+        : parsed.scheduledFor,
+    maxAttempts: parsed.maxAttempts,
+    createdBy: normalizeOptionalText(parsed.createdBy),
   };
 }
 
@@ -787,8 +837,10 @@ async function processNotificationDelivery(delivery: {
   }
 
   const dispatchResult = await dispatchNotificationChannel(delivery.channel, {
+    type: delivery.type,
     subject: delivery.subject ?? undefined,
     content: delivery.content,
+    metadata: delivery.metadata,
     recipientAddress: delivery.recipientAddress ?? undefined,
     user: delivery.recipient,
   });
@@ -1052,6 +1104,28 @@ export async function enqueueTransactionalNotification(
   return result;
 }
 
+export async function enqueueSystemNotification(
+  input: EnqueueSystemNotificationInput,
+) {
+  const parsedInput = parseEnqueueSystemNotificationInput(input);
+
+  return createNotificationDeliveries({
+    orgId: parsedInput.orgId,
+    eventId: parsedInput.eventId,
+    userIds: parsedInput.userIds,
+    type: parsedInput.type,
+    subject: parsedInput.subject,
+    content: parsedInput.content,
+    channels:
+      parsedInput.channels ?? CHANNEL_DEFAULTS_BY_TYPE[parsedInput.type],
+    idempotencyKeyBase: parsedInput.idempotencyKeyBase,
+    metadata: parsedInput.metadata,
+    scheduledFor: parsedInput.scheduledFor,
+    maxAttempts: parsedInput.maxAttempts,
+    createdBy: parsedInput.createdBy,
+  });
+}
+
 export async function sendOrganizerAnnouncement(
   eventId: string,
   input: SendOrganizerAnnouncementInput,
@@ -1198,6 +1272,22 @@ export async function enqueueOrderConfirmationNotification(orderId: string) {
           timezone: true,
         },
       },
+      tickets: {
+        select: {
+          id: true,
+          qrToken: true,
+          ticketClass: {
+            select: {
+              name: true,
+            },
+          },
+          attendee: {
+            select: {
+              name: true,
+            },
+          },
+        },
+      },
     },
   });
 
@@ -1218,6 +1308,18 @@ export async function enqueueOrderConfirmationNotification(orderId: string) {
     metadata: {
       orderId: order.id,
       eventId: order.eventId,
+      eventTitle: order.event.title,
+      eventStartAt: order.event.startAt.toISOString(),
+      eventTimezone: order.event.timezone,
+      totalAmount,
+      currency: order.currency,
+      manageTicketsUrl: `${env.NEXT_PUBLIC_APP_URL}/attendee/dashboard`,
+      tickets: order.tickets.map((ticket) => ({
+        id: ticket.id,
+        qrToken: ticket.qrToken,
+        ticketClassName: ticket.ticketClass.name,
+        attendeeName: ticket.attendee.name,
+      })),
     },
     maxAttempts: 6,
   });

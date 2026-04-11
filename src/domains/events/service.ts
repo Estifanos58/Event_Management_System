@@ -1,10 +1,12 @@
 import {
   EventStatus,
   EventVisibility,
+  NotificationType,
   Prisma,
   RegistrationType,
   Role,
   ScopeType,
+  TicketStatus,
   TicketReleaseStrategy,
   TicketType,
   VenueMode,
@@ -18,6 +20,7 @@ import {
   type BetterSession,
 } from "@/core/auth/session";
 import { prisma } from "@/core/db/prisma";
+import { env } from "@/core/env";
 import { EventDomainError } from "@/domains/events/errors";
 import {
   assertTransitionAllowed,
@@ -47,6 +50,7 @@ import {
 } from "@/domains/identity/guards";
 import { canAccess, getPermissions } from "@/domains/identity/permissions";
 import { ROLE_DEFAULT_PERMISSIONS } from "@/domains/identity/types";
+import { enqueueSystemNotification } from "@/domains/notifications/service";
 
 const draftPayloadSchema = z.object({
   title: z
@@ -1457,6 +1461,53 @@ export async function transitionEventStatus(
     },
   });
 
+  if (
+    updated.status === EventStatus.CANCELLED ||
+    updated.status === EventStatus.POSTPONED
+  ) {
+    const attendeeRows = await prisma.ticket.findMany({
+      where: {
+        eventId,
+        status: {
+          in: [TicketStatus.VALID, TicketStatus.USED],
+        },
+      },
+      distinct: ["attendeeId"],
+      select: {
+        attendeeId: true,
+      },
+      take: 20_000,
+    });
+
+    if (attendeeRows.length > 0) {
+      void enqueueSystemNotification({
+        eventId,
+        orgId: event.orgId,
+        userIds: attendeeRows.map((entry) => entry.attendeeId),
+        type: NotificationType.EVENT_STATUS_CHANGED,
+        subject: `Event update: ${event.title}`,
+        content: `This event status changed from ${event.status} to ${updated.status}.`,
+        idempotencyKeyBase: `txn:event-status:${eventId}:${updated.version}`,
+        metadata: {
+          eventTitle: event.title,
+          previousStatus: event.status,
+          nextStatus: updated.status,
+          reason: transition.reason,
+          startAt: event.startAt.toISOString(),
+          timezone: event.timezone,
+          eventUrl: `${env.NEXT_PUBLIC_APP_URL}/events/${eventId}`,
+        },
+        maxAttempts: 6,
+      }).catch((error) => {
+        console.warn("Failed to enqueue event status notifications", {
+          eventId,
+          status: updated.status,
+          error: error instanceof Error ? error.message : "unknown",
+        });
+      });
+    }
+  }
+
   return updated;
 }
 
@@ -1906,6 +1957,30 @@ export async function assignEventStaff(
       gateId: assignment?.gateId,
       assignmentRole: assignment?.assignmentRole ?? parsedInput.assignmentRole,
     },
+  });
+
+  void enqueueSystemNotification({
+    orgId: event.orgId,
+    eventId,
+    userIds: [user.id],
+    type: NotificationType.STAFF_ASSIGNED,
+    subject: `You were assigned as staff for ${event.title}`,
+    content: "Your staff access has been granted for this event.",
+    idempotencyKeyBase: `txn:staff-assigned:${eventId}:${user.id}:${gate?.id ?? "event"}`,
+    metadata: {
+      eventTitle: event.title,
+      gateName: gate?.name,
+      assignmentRole: assignment?.assignmentRole ?? parsedInput.assignmentRole,
+      assignedByName: session.user.name,
+      dashboardUrl: `${env.NEXT_PUBLIC_APP_URL}/staff/dashboard`,
+    },
+    maxAttempts: 6,
+  }).catch((error) => {
+    console.warn("Failed to enqueue staff assignment notification", {
+      eventId,
+      userId: user.id,
+      error: error instanceof Error ? error.message : "unknown",
+    });
   });
 
   return {

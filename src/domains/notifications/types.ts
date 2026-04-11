@@ -105,3 +105,18 @@ export type EnqueueNotificationResult = {
   created: number;
   deduped: number;
 };
+
+export type EnqueueSystemNotificationInput = {
+  orgId?: string;
+  eventId?: string;
+  userIds: string[];
+  type: NotificationType;
+  subject?: string;
+  content: string;
+  channels?: NotificationChannel[];
+  idempotencyKeyBase: string;
+  metadata?: unknown;
+  scheduledFor?: string | Date;
+  maxAttempts?: number;
+  createdBy?: string;
+};

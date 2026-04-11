@@ -1,5 +1,6 @@
 import {
   EventStatus,
+  NotificationType,
   OrderStatus,
   PaymentAttemptStatus,
   Prisma,
@@ -44,7 +45,10 @@ import {
   requirePermission,
 } from "@/domains/identity/guards";
 import { ROLE_DEFAULT_PERMISSIONS } from "@/domains/identity/types";
-import { enqueueOrderConfirmationNotification } from "@/domains/notifications/service";
+import {
+  enqueueSystemNotification,
+  enqueueOrderConfirmationNotification,
+} from "@/domains/notifications/service";
 
 const DEFAULT_RESERVATION_TTL_MINUTES = 15;
 
@@ -1341,7 +1345,12 @@ export async function promoteWaitlist(eventId: string) {
 
     let eventAvailability = eventInventory?.available ?? Number.POSITIVE_INFINITY;
 
-    const promoted: string[] = [];
+    const promoted: Array<{
+      id: string;
+      userId: string;
+      ticketClassId: string;
+      claimExpiresAt: Date;
+    }> = [];
 
     for (const entry of waitingEntries) {
       const classAvailability = perClassAvailable.get(entry.ticketClassId) ?? 0;
@@ -1350,6 +1359,8 @@ export async function promoteWaitlist(eventId: string) {
         continue;
       }
 
+      const claimExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+
       await tx.waitlistEntry.update({
         where: {
           id: entry.id,
@@ -1357,32 +1368,75 @@ export async function promoteWaitlist(eventId: string) {
         data: {
           status: WaitlistStatus.NOTIFIED,
           notifiedAt: now(),
-          claimExpiresAt: new Date(Date.now() + 30 * 60 * 1000),
+          claimExpiresAt,
         },
       });
 
       perClassAvailable.set(entry.ticketClassId, classAvailability - 1);
       eventAvailability -= 1;
 
-      promoted.push(entry.id);
+      promoted.push({
+        id: entry.id,
+        userId: entry.userId,
+        ticketClassId: entry.ticketClassId,
+        claimExpiresAt,
+      });
     }
 
     return promoted;
   });
 
-  for (const entryId of promotedEntries) {
+  const ticketClassById = new Map(
+    (
+      await prisma.ticketClass.findMany({
+        where: {
+          id: {
+            in: Array.from(new Set(promotedEntries.map((entry) => entry.ticketClassId))),
+          },
+        },
+        select: {
+          id: true,
+          name: true,
+        },
+      })
+    ).map((ticketClass) => [ticketClass.id, ticketClass.name]),
+  );
+
+  for (const entry of promotedEntries) {
     await writeAuditEvent({
       action: "ticketing.waitlist.notified",
       scopeType: ScopeType.EVENT,
       scopeId: eventId,
       targetType: "WaitlistEntry",
-      targetId: entryId,
+      targetId: entry.id,
+    });
+
+    void enqueueSystemNotification({
+      eventId,
+      userIds: [entry.userId],
+      type: NotificationType.WAITLIST_PROMOTED,
+      subject: `Waitlist spot opened for ${event.title}`,
+      content: "A ticket is now available for claim. Complete checkout before the claim window expires.",
+      idempotencyKeyBase: `txn:waitlist-promoted:${entry.id}`,
+      metadata: {
+        eventTitle: event.title,
+        ticketClassName: ticketClassById.get(entry.ticketClassId) ?? "Ticket",
+        claimExpiresAt: entry.claimExpiresAt.toISOString(),
+        claimUrl: `${env.NEXT_PUBLIC_APP_URL}/attendee/dashboard`,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue waitlist promotion notification", {
+        entryId: entry.id,
+        eventId,
+        error: error instanceof Error ? error.message : "unknown",
+      });
     });
   }
 
   return {
     promoted: promotedEntries.length,
-    promotedIds: promotedEntries,
+    promotedIds: promotedEntries.map((entry) => entry.id),
   };
 }
 
@@ -1849,13 +1903,46 @@ async function markPaymentFailed(
     },
   });
 
-  await prisma.order.update({
+  const order = await prisma.order.update({
     where: {
       id: orderId,
     },
     data: {
       status: OrderStatus.FAILED,
     },
+    select: {
+      id: true,
+      eventId: true,
+      buyerUserId: true,
+      event: {
+        select: {
+          title: true,
+        },
+      },
+    },
+  });
+
+  void enqueueSystemNotification({
+    eventId: order.eventId,
+    userIds: [order.buyerUserId],
+    type: NotificationType.PAYMENT_FAILED,
+    subject: `Payment failed for ${order.event.title}`,
+    content:
+      "We could not complete your payment. Retry checkout if your reservation is still active.",
+    idempotencyKeyBase: `txn:payment-failed:${attemptId}`,
+    metadata: {
+      orderId: order.id,
+      eventTitle: order.event.title,
+      failureCode,
+      retryUrl: `${env.NEXT_PUBLIC_APP_URL}/attendee/dashboard`,
+    },
+    maxAttempts: 6,
+  }).catch((error) => {
+    console.warn("Failed to enqueue payment failure notification", {
+      attemptId,
+      orderId,
+      error: error instanceof Error ? error.message : "unknown",
+    });
   });
 }
 
@@ -2291,6 +2378,16 @@ export async function requestTicketTransfer(
       id: true,
       ownerId: true,
       status: true,
+      event: {
+        select: {
+          title: true,
+        },
+      },
+      ticketClass: {
+        select: {
+          name: true,
+        },
+      },
     },
   });
 
@@ -2376,6 +2473,31 @@ export async function requestTicketTransfer(
     },
   });
 
+  void enqueueSystemNotification({
+    eventId,
+    userIds: [targetUser.id],
+    type: NotificationType.TICKET_TRANSFER_REQUESTED,
+    subject: `Ticket transfer request for ${ticket.event.title}`,
+    content:
+      "A ticket has been offered to you. Review and respond before the transfer expires.",
+    idempotencyKeyBase: `txn:transfer-requested:${transfer.id}`,
+    metadata: {
+      transferId: transfer.id,
+      eventTitle: ticket.event.title,
+      ticketLabel: ticket.ticketClass.name,
+      fromUserName: authz.session.user.name,
+      expiresAt: transfer.expiresAt.toISOString(),
+      actionUrl: `${env.NEXT_PUBLIC_APP_URL}/attendee/dashboard`,
+    },
+    maxAttempts: 6,
+  }).catch((error) => {
+    console.warn("Failed to enqueue transfer request notification", {
+      transferId: transfer.id,
+      eventId,
+      error: error instanceof Error ? error.message : "unknown",
+    });
+  });
+
   return transfer;
 }
 
@@ -2392,11 +2514,34 @@ export async function respondToTicketTransfer(
       id: transferId,
     },
     include: {
+      fromUser: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      toUser: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
       ticket: {
         select: {
           id: true,
           eventId: true,
           status: true,
+          qrToken: true,
+          event: {
+            select: {
+              title: true,
+            },
+          },
+          ticketClass: {
+            select: {
+              name: true,
+            },
+          },
         },
       },
     },
@@ -2461,6 +2606,57 @@ export async function respondToTicketTransfer(
     targetId: transfer.id,
     reason: parsedInput.reason,
   });
+
+  void enqueueSystemNotification({
+    eventId,
+    userIds: [transfer.fromUserId],
+    type: NotificationType.TICKET_TRANSFER_UPDATED,
+    subject: `Transfer update for ${transfer.ticket.event.title}`,
+    content: "A transfer response has been recorded for your ticket.",
+    idempotencyKeyBase: `txn:transfer-updated:${updatedTransfer.id}:${updatedTransfer.status}`,
+    metadata: {
+      transferId: updatedTransfer.id,
+      eventTitle: transfer.ticket.event.title,
+      ticketLabel: transfer.ticket.ticketClass.name,
+      transferStatus: updatedTransfer.status,
+      toUserName: transfer.toUser.name,
+      reason: parsedInput.reason,
+      manageUrl: `${env.NEXT_PUBLIC_APP_URL}/attendee/dashboard`,
+    },
+    maxAttempts: 6,
+  }).catch((error) => {
+    console.warn("Failed to enqueue transfer sender update notification", {
+      transferId: updatedTransfer.id,
+      eventId,
+      error: error instanceof Error ? error.message : "unknown",
+    });
+  });
+
+  if (updatedTransfer.status === TicketTransferStatus.ACCEPTED) {
+    void enqueueSystemNotification({
+      eventId,
+      userIds: [transfer.toUserId],
+      type: NotificationType.TICKET_TRANSFER_RECEIVED,
+      subject: `You received a ticket for ${transfer.ticket.event.title}`,
+      content: "Ticket ownership has been transferred to your account.",
+      idempotencyKeyBase: `txn:transfer-received:${updatedTransfer.id}`,
+      metadata: {
+        transferId: updatedTransfer.id,
+        eventTitle: transfer.ticket.event.title,
+        ticketLabel: transfer.ticket.ticketClass.name,
+        fromUserName: transfer.fromUser.name,
+        qrToken: transfer.ticket.qrToken,
+        manageUrl: `${env.NEXT_PUBLIC_APP_URL}/attendee/dashboard`,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue transfer recipient notification", {
+        transferId: updatedTransfer.id,
+        eventId,
+        error: error instanceof Error ? error.message : "unknown",
+      });
+    });
+  }
 
   return updatedTransfer;
 }
