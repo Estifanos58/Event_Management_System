@@ -4,6 +4,8 @@ import { runComplianceMaintenance } from "../domains/compliance/service";
 import { env } from "../core/env";
 import { runIntegrationsMaintenance } from "../domains/integrations/service";
 import { runNotificationsMaintenance } from "../domains/notifications/service";
+import { reconcilePendingRefunds } from "../domains/payments/service";
+import { runTicketingMaintenance } from "../domains/ticketing/service";
 import { runOperationalAlertSweep } from "../core/ops/alerts";
 import { logError, logInfo } from "../core/observability/logger";
 import { withObservabilityContext } from "../core/observability/context";
@@ -38,6 +40,8 @@ async function runWorkerTick() {
         await withTraceSpan("worker.tick", async () => {
           const integrationsResult = await runIntegrationsMaintenance();
           const notificationsResult = await runNotificationsMaintenance();
+          const refundReconciliationResult = await reconcilePendingRefunds();
+          const ticketingResult = await runTicketingMaintenance();
           const complianceResult = await runComplianceMaintenance();
           const operationalResult = await runOperationalAlertSweep();
 
@@ -50,6 +54,22 @@ async function runWorkerTick() {
             notificationsResult.queuedReminders > 0
           ) {
             logInfo("worker.notifications.maintenance", notificationsResult);
+          }
+
+          if (refundReconciliationResult.checked > 0) {
+            logInfo("worker.refunds.reconciliation", refundReconciliationResult);
+          }
+
+          if (
+            ticketingResult.expiredReservations > 0 ||
+            ticketingResult.promotedWaitlistEntries > 0 ||
+            ticketingResult.expiredTransfers > 0 ||
+            ticketingResult.expiredWaitlistClaims > 0 ||
+            ticketingResult.reconciledPaymentAttempts > 0 ||
+            ticketingResult.cancelledProviderTransactions > 0 ||
+            ticketingResult.rotatedLegacyQrTokens > 0
+          ) {
+            logInfo("worker.ticketing.maintenance", ticketingResult);
           }
 
           if (

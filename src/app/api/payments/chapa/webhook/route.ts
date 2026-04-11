@@ -27,6 +27,7 @@ export async function POST(request: Request) {
 
       const signature =
         request.headers.get("x-chapa-signature") ??
+        request.headers.get("chapa-signature") ??
         request.headers.get("x-webhook-signature");
       const rawBody = await request.text();
 
@@ -63,6 +64,7 @@ export async function POST(request: Request) {
       try {
         result = await processChapaWebhook(signature, body, {
           skipSignatureVerification: true,
+          rawBody: rawBody || "{}",
         });
       } catch (error) {
         await markInboundProviderEventFailed(

@@ -55,6 +55,35 @@ export type RetryPaymentInput = {
   returnUrl?: string;
 };
 
+export type ChapaCallbackInput = {
+  txRef: string;
+  providerEventId?: string;
+  payload: unknown;
+};
+
+export type ChapaTransactionProcessResult = {
+  idempotent: boolean;
+  paymentAttemptId: string;
+  orderId: string;
+  status: string;
+};
+
+export type OrderPaymentStatusSnapshot = {
+  orderId: string;
+  orderStatus: string;
+  totalAmount: number;
+  currency: string;
+  paymentAttemptId?: string;
+  paymentAttemptStatus?: string;
+  paymentProvider?: string;
+  providerReference?: string;
+  checkoutUrl?: string;
+  failureCode?: string;
+  completedAt?: string;
+  updatedAt: string;
+  isFinal: boolean;
+};
+
 export type TicketTransferRequestInput = {
   toUserEmail: string;
   expiresInHours?: number;
@@ -77,6 +106,7 @@ export type TicketingMaintenanceResult = {
   expiredWaitlistClaims: number;
   reconciledPaymentAttempts: number;
   rotatedLegacyQrTokens: number;
+  cancelledProviderTransactions: number;
 };
 
 export type PaymentReconciliationResult = {

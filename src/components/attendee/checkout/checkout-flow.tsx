@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -40,6 +40,17 @@ type PaymentSummary = {
   id: string;
   status: string;
   checkoutUrl: string | null;
+};
+
+type PaymentStatusSnapshot = {
+  orderId: string;
+  orderStatus: string;
+  totalAmount: number;
+  currency: string;
+  paymentAttemptId?: string;
+  paymentAttemptStatus?: string;
+  checkoutUrl?: string;
+  isFinal: boolean;
 };
 
 type CheckoutFlowProps = {
@@ -95,6 +106,21 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return payload as T;
 }
 
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  const payload = (await response.json().catch(() => null)) as unknown;
+
+  if (!response.ok) {
+    throw new Error(parseError(payload, "Request failed."));
+  }
+
+  return payload as T;
+}
+
 function toAmount(value: unknown) {
   if (typeof value === "number") {
     return value;
@@ -129,6 +155,7 @@ export function CheckoutFlow({
   const [reservation, setReservation] = useState<ReservationSummary | null>(initialReservation);
   const [order, setOrder] = useState<OrderSummary | null>(null);
   const [payment, setPayment] = useState<PaymentSummary | null>(null);
+  const [isStatusSyncing, setIsStatusSyncing] = useState(false);
 
   const ticketClassLookup = useMemo(
     () => new Map(ticketClasses.map((ticketClass) => [ticketClass.id, ticketClass])),
@@ -245,7 +272,12 @@ export function CheckoutFlow({
         throw new Error("Create an order first.");
       }
 
-      const returnUrl = window.location.href;
+      const returnUrlObject = new URL(window.location.href);
+      ["trx_ref", "tx_ref", "ref_id", "status"].forEach((key) => {
+        returnUrlObject.searchParams.delete(key);
+      });
+      returnUrlObject.searchParams.set("orderId", order.id);
+      const returnUrl = returnUrlObject.toString();
 
       const response = await postJson<{
         paymentAttempt: {
@@ -281,6 +313,85 @@ export function CheckoutFlow({
       toast.error(error instanceof Error ? error.message : "Failed to initialize payment.");
     },
   });
+
+  const refreshPaymentStatus = useCallback(
+    async (targetOrderId: string, options?: { silent?: boolean }) => {
+      setIsStatusSyncing(true);
+
+      try {
+        const response = await getJson<{
+          paymentStatus: PaymentStatusSnapshot;
+        }>(`/api/events/${eventId}/orders/${targetOrderId}/payments/status`);
+
+        const snapshot = response.paymentStatus;
+
+        setOrder({
+          id: snapshot.orderId,
+          status: snapshot.orderStatus,
+          totalAmount: toAmount(snapshot.totalAmount),
+          currency: snapshot.currency,
+        });
+
+        if (snapshot.paymentAttemptId) {
+          setPayment({
+            id: snapshot.paymentAttemptId,
+            status: snapshot.paymentAttemptStatus ?? "UNKNOWN",
+            checkoutUrl: snapshot.checkoutUrl ?? null,
+          });
+        } else {
+          setPayment(null);
+        }
+
+        if (!options?.silent) {
+          if (snapshot.orderStatus === "COMPLETED") {
+            toast.success("Payment completed and tickets have been issued.");
+          } else if (snapshot.isFinal) {
+            toast.error("Payment did not complete successfully.");
+          } else {
+            toast.message("Payment is still processing.");
+          }
+        }
+
+        return snapshot;
+      } catch (error) {
+        if (!options?.silent) {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : "Failed to refresh payment status.",
+          );
+        }
+
+        return null;
+      } finally {
+        setIsStatusSyncing(false);
+      }
+    },
+    [eventId],
+  );
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const orderIdFromReturn = params.get("orderId");
+
+    if (!orderIdFromReturn) {
+      return;
+    }
+
+    const hasChapaReturnSignal =
+      Boolean(params.get("trx_ref")) ||
+      Boolean(params.get("tx_ref")) ||
+      Boolean(params.get("ref_id")) ||
+      Boolean(params.get("status"));
+
+    if (!hasChapaReturnSignal) {
+      return;
+    }
+
+    void refreshPaymentStatus(orderIdFromReturn, {
+      silent: false,
+    });
+  }, [refreshPaymentStatus]);
 
   const reservationTotal = reservation
     ? reservation.items.reduce((sum, item) => sum + item.quantity, 0)
@@ -447,6 +558,22 @@ export function CheckoutFlow({
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-500">
               <p className="font-medium text-gray-900">Payment attempt {payment.id}</p>
               <p className="mt-1">Status: {payment.status}</p>
+              <div className="mt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    if (!order) {
+                      return;
+                    }
+
+                    void refreshPaymentStatus(order.id);
+                  }}
+                  disabled={!order || isStatusSyncing}
+                >
+                  {isStatusSyncing ? "Refreshing status..." : "Refresh payment status"}
+                </Button>
+              </div>
               {payment.checkoutUrl ? (
                 <a
                   href={payment.checkoutUrl}

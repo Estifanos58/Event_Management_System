@@ -100,3 +100,10 @@ export type FinancialReconciliationReport = {
     variance: number;
   };
 };
+
+export type RefundReconciliationResult = {
+  checked: number;
+  completed: number;
+  failed: number;
+  processing: number;
+};

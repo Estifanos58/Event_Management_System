@@ -15,6 +15,7 @@ import {
 } from "@prisma/client";
 import { z } from "zod";
 import { writeAuditEvent } from "@/core/audit/audit";
+import { initiateChapaRefund, verifyChapaRefund } from "@/core/chapa/client";
 import { prisma } from "@/core/db/prisma";
 import { env } from "@/core/env";
 import {
@@ -28,6 +29,7 @@ import type {
   FinancialReconciliationReport,
   FinancialReconciliationReportInput,
   OrderRefundPolicyDecision,
+  RefundReconciliationResult,
   RecordPaymentDisputeInput,
   SchedulePayoutInput,
   TransitionPayoutInput,
@@ -165,6 +167,78 @@ function toDecimalNumber(value: Prisma.Decimal | number | null | undefined): num
 
 function roundCurrency(amount: number) {
   return Math.round((amount + Number.EPSILON) * 100) / 100;
+}
+
+function mapChapaRefundStatus(status?: string): RefundStatus {
+  const normalized = status?.trim().toLowerCase();
+
+  if (!normalized || normalized === "initiated" || normalized === "processing") {
+    return RefundStatus.PROCESSING;
+  }
+
+  if (normalized === "refunded") {
+    return RefundStatus.COMPLETED;
+  }
+
+  if (normalized === "reversed" || normalized === "failed" || normalized === "cancelled") {
+    return RefundStatus.FAILED;
+  }
+
+  return RefundStatus.PROCESSING;
+}
+
+function buildRefundProviderReference(refundId: string) {
+  return `refund-${refundId}`;
+}
+
+async function applyRefundCompletionSideEffects(
+  tx: Prisma.TransactionClient,
+  input: {
+    orderId: string;
+    paymentAttemptId: string;
+    orderTotalAmount: number;
+  },
+) {
+  const completedRefundAggregate = await tx.refund.aggregate({
+    where: {
+      orderId: input.orderId,
+      status: RefundStatus.COMPLETED,
+    },
+    _sum: {
+      amount: true,
+    },
+  });
+
+  const totalRefunded = roundCurrency(toDecimalNumber(completedRefundAggregate._sum.amount));
+  const fullyRefunded = totalRefunded >= input.orderTotalAmount - EPSILON;
+
+  if (fullyRefunded) {
+    await tx.paymentAttempt.update({
+      where: {
+        id: input.paymentAttemptId,
+      },
+      data: {
+        status: PaymentAttemptStatus.REFUNDED,
+      },
+    });
+
+    await tx.ticket.updateMany({
+      where: {
+        orderId: input.orderId,
+        status: {
+          in: [TicketStatus.VALID, TicketStatus.CANCELLED],
+        },
+      },
+      data: {
+        status: TicketStatus.REFUNDED,
+      },
+    });
+  }
+
+  return {
+    totalRefunded,
+    fullyRefunded,
+  };
 }
 
 function assertValidPeriod(periodStart: Date, periodEnd: Date) {
@@ -798,6 +872,8 @@ export async function executeOrderRefund(
         select: {
           id: true,
           status: true,
+          provider: true,
+          providerReference: true,
         },
       },
     },
@@ -846,78 +922,116 @@ export async function executeOrderRefund(
 
   const orderTotalAmount = roundCurrency(toDecimalNumber(order.totalAmount));
 
-  const result = await prisma.$transaction(async (tx) => {
-    const requestedRefund = await tx.refund.create({
-      data: {
-        orderId: order.id,
-        paymentAttemptId: paymentAttempt.id,
-        amount: requestedAmount,
-        currency: order.currency,
+  const requestedRefund = await prisma.refund.create({
+    data: {
+      orderId: order.id,
+      paymentAttemptId: paymentAttempt.id,
+      amount: requestedAmount,
+      currency: order.currency,
+      reason: parsedInput.reason,
+      status: RefundStatus.REQUESTED,
+      requestedBy: session.user.id,
+    },
+  });
+
+  let resolvedStatus: RefundStatus = RefundStatus.COMPLETED;
+  let providerStatus: string | undefined;
+  let providerRefundReference: string | undefined;
+  let providerResponse: Prisma.InputJsonValue | undefined;
+  let failureCode: string | undefined;
+
+  if (paymentAttempt.provider === "CHAPA") {
+    if (!paymentAttempt.providerReference) {
+      resolvedStatus = RefundStatus.FAILED;
+      failureCode = "CHAPA_REFUND_TX_REF_MISSING";
+    } else {
+      const refundReference = buildRefundProviderReference(requestedRefund.id);
+
+      const initiated = await initiateChapaRefund(paymentAttempt.providerReference, {
         reason: parsedInput.reason,
-        status: RefundStatus.REQUESTED,
-        requestedBy: session.user.id,
-      },
-    });
-
-    await tx.refund.update({
-      where: {
-        id: requestedRefund.id,
-      },
-      data: {
-        status: RefundStatus.PROCESSING,
-      },
-    });
-
-    const completedRefund = await tx.refund.update({
-      where: {
-        id: requestedRefund.id,
-      },
-      data: {
-        status: RefundStatus.COMPLETED,
-        completedAt: now(),
-      },
-    });
-
-    const completedRefundAggregate = await tx.refund.aggregate({
-      where: {
-        orderId: order.id,
-        status: RefundStatus.COMPLETED,
-      },
-      _sum: {
-        amount: true,
-      },
-    });
-
-    const totalRefunded = roundCurrency(toDecimalNumber(completedRefundAggregate._sum.amount));
-    const fullyRefunded = totalRefunded >= orderTotalAmount - EPSILON;
-
-    if (fullyRefunded) {
-      await tx.paymentAttempt.update({
-        where: {
-          id: paymentAttempt.id,
-        },
-        data: {
-          status: PaymentAttemptStatus.REFUNDED,
+        amount: requestedAmount.toFixed(2),
+        reference: refundReference,
+        meta: {
+          order_id: order.id,
+          refund_id: requestedRefund.id,
+          event_id: eventId,
         },
       });
 
-      await tx.ticket.updateMany({
-        where: {
-          orderId: order.id,
-          status: {
-            in: [TicketStatus.VALID, TicketStatus.CANCELLED],
-          },
-        },
-        data: {
-          status: TicketStatus.REFUNDED,
-        },
-      });
+      providerResponse = initiated as unknown as Prisma.InputJsonValue;
+
+      if (initiated.status !== "success") {
+        resolvedStatus = RefundStatus.FAILED;
+        failureCode = "CHAPA_REFUND_INIT_FAILED";
+      } else {
+        providerRefundReference = normalizeOptionalText(initiated.data?.ref_id);
+        providerStatus = normalizeOptionalText(initiated.data?.status);
+        resolvedStatus = mapChapaRefundStatus(providerStatus);
+
+        if (providerRefundReference) {
+          try {
+            const verifiedRefund = await verifyChapaRefund(providerRefundReference);
+            providerResponse = verifiedRefund as unknown as Prisma.InputJsonValue;
+
+            if (verifiedRefund.status === "success" && verifiedRefund.data) {
+              providerStatus = normalizeOptionalText(verifiedRefund.data.status);
+              resolvedStatus = mapChapaRefundStatus(providerStatus);
+            }
+          } catch {
+            resolvedStatus = RefundStatus.PROCESSING;
+          }
+        } else {
+          resolvedStatus = RefundStatus.PROCESSING;
+        }
+      }
     }
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const refund = await tx.refund.update({
+      where: {
+        id: requestedRefund.id,
+      },
+      data: {
+        status: resolvedStatus,
+        providerRefundReference,
+        providerStatus,
+        providerResponse,
+        failureCode,
+        completedAt: resolvedStatus === RefundStatus.COMPLETED ? now() : null,
+      },
+    });
+
+    const sideEffects =
+      resolvedStatus === RefundStatus.COMPLETED
+        ? await applyRefundCompletionSideEffects(tx, {
+            orderId: order.id,
+            paymentAttemptId: paymentAttempt.id,
+            orderTotalAmount,
+          })
+        : {
+            totalRefunded: roundCurrency(
+              toDecimalNumber(
+                (
+                  await tx.refund.aggregate({
+                    where: {
+                      orderId: order.id,
+                      status: RefundStatus.COMPLETED,
+                    },
+                    _sum: {
+                      amount: true,
+                    },
+                  })
+                )._sum.amount,
+              ),
+            ),
+            fullyRefunded: false,
+          };
 
     return {
-      refund: completedRefund,
-      totalRefunded,
-      fullyRefunded,
+      refund,
+      totalRefunded: sideEffects.totalRefunded,
+      fullyRefunded: sideEffects.fullyRefunded,
     };
   });
 
@@ -938,44 +1052,168 @@ export async function executeOrderRefund(
       policyMaxRefundAmount: policy.maxRefundAmount,
       overridePolicy: parsedInput.overridePolicy,
       overrideReasonCode: parsedInput.overrideReasonCode,
+      provider: paymentAttempt.provider,
+      providerReference: paymentAttempt.providerReference,
+      providerRefundReference,
+      providerStatus,
+      failureCode,
       totalRefunded: result.totalRefunded,
       fullyRefunded: result.fullyRefunded,
     },
   });
 
-  void enqueueSystemNotification({
-    eventId,
-    userIds: [order.buyerUserId],
-    type: NotificationType.REFUND_COMPLETED,
-    subject: `Refund processed for ${order.event.title}`,
-    content: "Your refund has been completed and reflected in your payment record.",
-    idempotencyKeyBase: `txn:refund-completed:${result.refund.id}`,
-    metadata: {
-      refundId: result.refund.id,
-      orderId,
-      eventTitle: order.event.title,
-      amount: requestedAmount,
-      currency: order.currency,
-      reason: parsedInput.reason,
-      policyWindow: policy.policyWindow,
-      totalRefunded: result.totalRefunded,
-      fullyRefunded: result.fullyRefunded,
-    },
-    maxAttempts: 6,
-  }).catch((error) => {
-    console.warn("Failed to enqueue refund notification", {
+  if (result.refund.status === RefundStatus.COMPLETED) {
+    void enqueueSystemNotification({
       eventId,
-      orderId,
-      refundId: result.refund.id,
-      error: error instanceof Error ? error.message : "unknown",
+      userIds: [order.buyerUserId],
+      type: NotificationType.REFUND_COMPLETED,
+      subject: `Refund processed for ${order.event.title}`,
+      content: "Your refund has been completed and reflected in your payment record.",
+      idempotencyKeyBase: `txn:refund-completed:${result.refund.id}`,
+      metadata: {
+        refundId: result.refund.id,
+        orderId,
+        eventTitle: order.event.title,
+        amount: requestedAmount,
+        currency: order.currency,
+        reason: parsedInput.reason,
+        policyWindow: policy.policyWindow,
+        totalRefunded: result.totalRefunded,
+        fullyRefunded: result.fullyRefunded,
+        providerRefundReference,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue refund notification", {
+        eventId,
+        orderId,
+        refundId: result.refund.id,
+        error: error instanceof Error ? error.message : "unknown",
+      });
     });
-  });
+  }
 
   return {
     refund: result.refund,
     policy,
     totalRefunded: result.totalRefunded,
     fullyRefunded: result.fullyRefunded,
+  };
+}
+
+export async function reconcilePendingRefunds(
+  limit = 100,
+): Promise<RefundReconciliationResult> {
+  const refunds = await prisma.refund.findMany({
+    where: {
+      status: RefundStatus.PROCESSING,
+      providerRefundReference: {
+        not: null,
+      },
+      paymentAttempt: {
+        provider: "CHAPA",
+      },
+    },
+    orderBy: {
+      createdAt: "asc",
+    },
+    take: limit,
+    include: {
+      order: {
+        select: {
+          id: true,
+          totalAmount: true,
+        },
+      },
+    },
+  });
+
+  let completed = 0;
+  let failed = 0;
+  let processing = 0;
+
+  for (const refund of refunds) {
+    if (!refund.providerRefundReference) {
+      processing += 1;
+      continue;
+    }
+
+    try {
+      const verified = await verifyChapaRefund(refund.providerRefundReference);
+
+      if (verified.status !== "success" || !verified.data) {
+        processing += 1;
+        continue;
+      }
+
+      const providerStatus = normalizeOptionalText(verified.data.status);
+      const nextStatus = mapChapaRefundStatus(providerStatus);
+
+      if (nextStatus === RefundStatus.PROCESSING) {
+        await prisma.refund.update({
+          where: {
+            id: refund.id,
+          },
+          data: {
+            providerStatus,
+            providerResponse: verified as unknown as Prisma.InputJsonValue,
+          },
+        });
+
+        processing += 1;
+        continue;
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const updatedRefund = await tx.refund.update({
+          where: {
+            id: refund.id,
+          },
+          data: {
+            status: nextStatus,
+            providerStatus,
+            providerResponse: verified as unknown as Prisma.InputJsonValue,
+            failureCode:
+              nextStatus === RefundStatus.FAILED
+                ? `CHAPA_REFUND_${providerStatus ?? "UNKNOWN"}`
+                : null,
+            completedAt: nextStatus === RefundStatus.COMPLETED ? now() : null,
+          },
+        });
+
+        const sideEffects =
+          nextStatus === RefundStatus.COMPLETED
+            ? await applyRefundCompletionSideEffects(tx, {
+                orderId: refund.orderId,
+                paymentAttemptId: refund.paymentAttemptId,
+                orderTotalAmount: roundCurrency(toDecimalNumber(refund.order.totalAmount)),
+              })
+            : {
+                totalRefunded: 0,
+                fullyRefunded: false,
+              };
+
+        return {
+          refund: updatedRefund,
+          sideEffects,
+        };
+      });
+
+      if (result.refund.status === RefundStatus.COMPLETED) {
+        completed += 1;
+      } else {
+        failed += 1;
+      }
+    } catch {
+      processing += 1;
+    }
+  }
+
+  return {
+    checked: refunds.length,
+    completed,
+    failed,
+    processing,
   };
 }
 

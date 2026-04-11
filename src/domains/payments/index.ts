@@ -10,6 +10,7 @@ export {
   transitionEventPayoutStatus,
   getOrderRefundPolicyDecision,
   executeOrderRefund,
+  reconcilePendingRefunds,
   recordPaymentDispute,
   listPaymentDisputes,
   updatePaymentDisputeWorkflow,
@@ -18,8 +19,10 @@ export {
 export {
   initializeOrderPayment,
   processChapaWebhook,
+  processChapaCallback,
   retryOrderPayment,
   reconcilePendingPayments,
+  getMyOrderPaymentStatus,
   parseInitializePaymentInput,
   parseRetryPaymentInput,
 } from "@/domains/ticketing/service";
@@ -32,10 +35,13 @@ export type {
   UpdatePaymentDisputeWorkflowInput,
   FinancialReconciliationReportInput,
   OrderRefundPolicyDecision,
+  RefundReconciliationResult,
   FinancialReconciliationReport,
 } from "@/domains/payments/types";
 export type {
   InitializePaymentInput,
   RetryPaymentInput,
   PaymentReconciliationResult,
+  ChapaTransactionProcessResult,
+  OrderPaymentStatusSnapshot,
 } from "@/domains/ticketing/types";

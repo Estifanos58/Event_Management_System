@@ -16,7 +16,13 @@ import { z } from "zod";
 import { writeAuditEvent } from "@/core/audit/audit";
 import { getServerSessionOrNull } from "@/core/auth/session";
 import { env } from "@/core/env";
-import { initializeChapaPayment, verifyChapaPayment } from "@/core/chapa/client";
+import {
+  cancelChapaTransaction,
+  initializeChapaPayment,
+  verifyChapaPayment,
+} from "@/core/chapa/client";
+import type { ChapaCallbackPayload } from "@/core/chapa/types";
+import { verifyChapaPayloadSignature } from "@/core/chapa/signature";
 import { prisma } from "@/core/db/prisma";
 import {
   extractTraceContextFromMetadata,
@@ -28,12 +34,15 @@ import { createSignedTicketQrToken } from "@/domains/checkin/qr-signing";
 import { TicketingDomainError } from "@/domains/ticketing/errors";
 import type {
   CheckoutInput,
+  ChapaCallbackInput,
+  ChapaTransactionProcessResult,
   ClaimWaitlistInput,
   CreateReservationInput,
   InitializePaymentInput,
   JoinWaitlistInput,
   PaymentReconciliationResult,
   RetryPaymentInput,
+  OrderPaymentStatusSnapshot,
   TicketCancellationInput,
   TicketTransferRequestInput,
   TicketTransferResponseInput,
@@ -214,6 +223,50 @@ function orderCurrencyUpper(currency: string): string {
 
 function isSuccessfulPaymentStatus(status: string): boolean {
   return ["SUCCESS", "CAPTURED", "PAID"].includes(status);
+}
+
+function isFailedPaymentStatus(status: string): boolean {
+  return ["FAILED", "CANCELLED", "REVERSED", "EXPIRED", "ERROR"].includes(status);
+}
+
+function isPendingPaymentStatus(status: string): boolean {
+  return ["PENDING", "PROCESSING", "INITIATED"].includes(status);
+}
+
+function normalizeProviderEventId(value?: string | null) {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function toChapaCallbackInput(payload: unknown): ChapaCallbackInput {
+  const body = payload as ChapaCallbackPayload;
+  const data = body?.data;
+
+  const txRef =
+    normalizeProviderEventId(data?.tx_ref) ??
+    normalizeProviderEventId(body?.tx_ref) ??
+    normalizeProviderEventId(body?.trx_ref);
+
+  if (!txRef) {
+    throw new TicketingDomainError(
+      400,
+      "BAD_REQUEST",
+      "Callback payload is missing tx_ref/trx_ref.",
+    );
+  }
+
+  const providerEventId =
+    normalizeProviderEventId(data?.id) ??
+    normalizeProviderEventId(data?.ref_id) ??
+    normalizeProviderEventId(body?.ref_id) ??
+    normalizeProviderEventId(body?.reference) ??
+    txRef;
+
+  return {
+    txRef,
+    providerEventId,
+    payload,
+  };
 }
 
 function toCurrencyAmount(value: Prisma.Decimal): number {
@@ -765,8 +818,16 @@ async function rotateLegacyTicketQrTokens(eventId?: string) {
   return rotated;
 }
 
-function assertWebhookSecret(receivedSignature: string | null) {
-  if (!receivedSignature || receivedSignature !== env.CHAPA_WEBHOOK_SECRET) {
+function assertWebhookSignature(
+  receivedSignature: string | null,
+  rawBody: string,
+) {
+  if (
+    !verifyChapaPayloadSignature({
+      rawBody,
+      signature: receivedSignature,
+    })
+  ) {
     throw new TicketingDomainError(
       401,
       "UNAUTHORIZED_WEBHOOK",
@@ -1164,6 +1225,76 @@ export async function getMyEventTickets(eventId: string) {
       issuedAt: "desc",
     },
   });
+}
+
+export async function getMyOrderPaymentStatus(
+  eventId: string,
+  orderId: string,
+): Promise<OrderPaymentStatusSnapshot> {
+  const authz = await requireTicketingSelfServicePermission(
+    eventId,
+    "payments.status.mine.read",
+  );
+
+  const order = await prisma.order.findFirst({
+    where: {
+      id: orderId,
+      eventId,
+      buyerUserId: authz.session.user.id,
+    },
+    select: {
+      id: true,
+      status: true,
+      totalAmount: true,
+      currency: true,
+      completedAt: true,
+      updatedAt: true,
+      paymentAttempts: {
+        orderBy: {
+          updatedAt: "desc",
+        },
+        take: 1,
+        select: {
+          id: true,
+          status: true,
+          provider: true,
+          providerReference: true,
+          checkoutUrl: true,
+          failureCode: true,
+          updatedAt: true,
+        },
+      },
+    },
+  });
+
+  if (!order) {
+    throw new TicketingDomainError(404, "RESERVATION_NOT_FOUND", "Order not found.");
+  }
+
+  const latestAttempt = order.paymentAttempts[0];
+
+  const isFinal =
+    order.status === OrderStatus.COMPLETED ||
+    latestAttempt?.status === PaymentAttemptStatus.CAPTURED ||
+    latestAttempt?.status === PaymentAttemptStatus.FAILED ||
+    latestAttempt?.status === PaymentAttemptStatus.VOIDED ||
+    latestAttempt?.status === PaymentAttemptStatus.REFUNDED;
+
+  return {
+    orderId: order.id,
+    orderStatus: order.status,
+    totalAmount: toCurrencyAmount(order.totalAmount),
+    currency: order.currency,
+    paymentAttemptId: latestAttempt?.id,
+    paymentAttemptStatus: latestAttempt?.status,
+    paymentProvider: latestAttempt?.provider,
+    providerReference: latestAttempt?.providerReference ?? undefined,
+    checkoutUrl: latestAttempt?.checkoutUrl ?? undefined,
+    failureCode: latestAttempt?.failureCode ?? undefined,
+    completedAt: order.completedAt?.toISOString(),
+    updatedAt: (latestAttempt?.updatedAt ?? order.updatedAt).toISOString(),
+    isFinal,
+  };
 }
 
 export async function expireStaleReservations(eventId?: string) {
@@ -1706,8 +1837,12 @@ export async function initializeOrderPayment(
   const email = (buyerSnapshot?.email ?? "buyer@example.com").trim();
 
   const txRef = `order-${order.id}-${Date.now()}`;
-  const callbackUrl = parsedInput.callbackUrl ?? `${env.NEXT_PUBLIC_APP_URL}/api/payments/chapa/webhook`;
-  const returnUrl = parsedInput.returnUrl ?? `${env.NEXT_PUBLIC_APP_URL}/orders/${order.id}`;
+  const callbackUrl =
+    parsedInput.callbackUrl ??
+    `${env.NEXT_PUBLIC_APP_URL}/api/payments/chapa/callback`;
+  const returnUrl =
+    parsedInput.returnUrl ??
+    `${env.NEXT_PUBLIC_APP_URL}/attendee/orders?orderId=${order.id}`;
   const traceMetadata = getTraceMetadataFromContext();
 
   const chapaResponse = await initializeChapaPayment({
@@ -1946,6 +2081,27 @@ async function markPaymentFailed(
   });
 }
 
+async function markPaymentProcessing(
+  attemptId: string,
+  providerEventId: string,
+  providerReference: string,
+  callbackPayload: Prisma.InputJsonValue,
+  status: PaymentAttemptStatus = PaymentAttemptStatus.PROCESSING,
+) {
+  await prisma.paymentAttempt.update({
+    where: {
+      id: attemptId,
+    },
+    data: {
+      status,
+      providerEventId,
+      providerReference,
+      callbackPayload,
+      failureCode: null,
+    },
+  });
+}
+
 async function markOrderCaptured(
   orderId: string,
   paymentAttemptId: string,
@@ -2159,42 +2315,17 @@ async function markOrderCaptured(
   return result;
 }
 
-export async function processChapaWebhook(
-  signature: string | null,
+async function processChapaTransactionByReference(
+  txRef: string,
+  providerEventId: string,
   payload: unknown,
-  options?: {
-    skipSignatureVerification?: boolean;
-  },
-) {
-  if (!options?.skipSignatureVerification) {
-    assertWebhookSecret(signature);
-  }
-
-  const body = payload as {
-    event?: string;
-    data?: {
-      tx_ref?: string;
-      id?: string;
-      status?: string;
-      amount?: string;
-      currency?: string;
-    };
-  };
-
-  const txRef = body?.data?.tx_ref;
-  const providerEventId = body?.data?.id ?? txRef;
-
-  if (!txRef || !providerEventId) {
-    throw new TicketingDomainError(400, "BAD_REQUEST", "Webhook payload is missing tx_ref/id.");
-  }
+): Promise<ChapaTransactionProcessResult> {
+  const normalizedProviderEventId = normalizeProviderEventId(providerEventId) ?? txRef;
 
   const existingAttempt = await prisma.paymentAttempt.findFirst({
     where: {
       provider: "CHAPA",
-      providerEventId,
-    },
-    include: {
-      order: true,
+      providerEventId: normalizedProviderEventId,
     },
   });
 
@@ -2215,89 +2346,130 @@ export async function processChapaWebhook(
   });
 
   if (!attempt) {
-    throw new TicketingDomainError(404, "RESERVATION_NOT_FOUND", "Payment attempt not found for tx_ref.");
+    throw new TicketingDomainError(
+      404,
+      "RESERVATION_NOT_FOUND",
+      "Payment attempt not found for tx_ref.",
+    );
   }
 
   const persistedTraceContext = extractTraceContextFromMetadata(attempt.metadata);
 
   const processAttempt = async () => {
-    const verified = await verifyChapaPayment(txRef);
+    try {
+      const verified = await verifyChapaPayment(txRef);
 
-    if (verified.status !== "success" || !verified.data) {
-      await markPaymentFailed(
+      if (verified.status !== "success" || !verified.data) {
+        await markPaymentProcessing(
+          attempt.id,
+          normalizedProviderEventId,
+          txRef,
+          payload as Prisma.InputJsonValue,
+        );
+
+        return {
+          idempotent: false,
+          paymentAttemptId: attempt.id,
+          orderId: attempt.orderId,
+          status: PaymentAttemptStatus.PROCESSING,
+        };
+      }
+
+      const status = (verified.data.status ?? "").toUpperCase();
+
+      const verifiedAmount = Number(verified.data.amount);
+      const expectedAmount = toCurrencyAmount(attempt.amount);
+      const amountMatches =
+        Number.isFinite(verifiedAmount) &&
+        Math.abs(verifiedAmount - expectedAmount) < 0.01;
+      const currencyMatches =
+        (verified.data.currency ?? "").toUpperCase() ===
+        orderCurrencyUpper(attempt.currency);
+
+      if (!amountMatches || !currencyMatches) {
+        await markPaymentFailed(
+          attempt.id,
+          attempt.orderId,
+          normalizedProviderEventId,
+          payload as Prisma.InputJsonValue,
+          "AMOUNT_OR_CURRENCY_MISMATCH",
+        );
+
+        return {
+          idempotent: false,
+          paymentAttemptId: attempt.id,
+          orderId: attempt.orderId,
+          status: PaymentAttemptStatus.FAILED,
+        };
+      }
+
+      if (isSuccessfulPaymentStatus(status)) {
+        await markOrderCaptured(
+          attempt.orderId,
+          attempt.id,
+          normalizedProviderEventId,
+          txRef,
+          payload as Prisma.InputJsonValue,
+        );
+
+        return {
+          idempotent: false,
+          paymentAttemptId: attempt.id,
+          orderId: attempt.orderId,
+          status: PaymentAttemptStatus.CAPTURED,
+        };
+      }
+
+      if (isFailedPaymentStatus(status)) {
+        await markPaymentFailed(
+          attempt.id,
+          attempt.orderId,
+          normalizedProviderEventId,
+          payload as Prisma.InputJsonValue,
+          `CHAPA_STATUS_${status || "UNKNOWN"}`,
+        );
+
+        return {
+          idempotent: false,
+          paymentAttemptId: attempt.id,
+          orderId: attempt.orderId,
+          status: PaymentAttemptStatus.FAILED,
+        };
+      }
+
+      const processingStatus = isPendingPaymentStatus(status)
+        ? PaymentAttemptStatus.PROCESSING
+        : PaymentAttemptStatus.REQUIRES_ACTION;
+
+      await markPaymentProcessing(
         attempt.id,
-        attempt.orderId,
-        providerEventId,
+        normalizedProviderEventId,
+        txRef,
         payload as Prisma.InputJsonValue,
-        "VERIFICATION_FAILED",
+        processingStatus,
       );
 
       return {
         idempotent: false,
         paymentAttemptId: attempt.id,
         orderId: attempt.orderId,
-        status: PaymentAttemptStatus.FAILED,
+        status: processingStatus,
       };
-    }
-
-    const status = (verified.data.status ?? "").toUpperCase();
-
-    const verifiedAmount = Number(verified.data.amount);
-    const expectedAmount = toCurrencyAmount(attempt.amount);
-    const amountMatches =
-      Number.isFinite(verifiedAmount) &&
-      Math.abs(verifiedAmount - expectedAmount) < 0.01;
-    const currencyMatches =
-      (verified.data.currency ?? "").toUpperCase() === orderCurrencyUpper(attempt.currency);
-
-    if (!amountMatches || !currencyMatches) {
-      await markPaymentFailed(
+    } catch {
+      await markPaymentProcessing(
         attempt.id,
-        attempt.orderId,
-        providerEventId,
+        normalizedProviderEventId,
+        txRef,
         payload as Prisma.InputJsonValue,
-        "AMOUNT_OR_CURRENCY_MISMATCH",
       );
 
       return {
         idempotent: false,
         paymentAttemptId: attempt.id,
         orderId: attempt.orderId,
-        status: PaymentAttemptStatus.FAILED,
+        status: PaymentAttemptStatus.PROCESSING,
       };
     }
-
-    if (!isSuccessfulPaymentStatus(status)) {
-      await markPaymentFailed(
-        attempt.id,
-        attempt.orderId,
-        providerEventId,
-        payload as Prisma.InputJsonValue,
-        `CHAPA_STATUS_${status || "UNKNOWN"}`,
-      );
-
-      return {
-        idempotent: false,
-        paymentAttemptId: attempt.id,
-        orderId: attempt.orderId,
-        status: PaymentAttemptStatus.FAILED,
-      };
-    }
-
-    await markOrderCaptured(
-      attempt.orderId,
-      attempt.id,
-      providerEventId,
-      txRef,
-      payload as Prisma.InputJsonValue,
-    );
-
-    return {
-      idempotent: false,
-      paymentAttemptId: attempt.id,
-      orderId: attempt.orderId,
-      status: PaymentAttemptStatus.CAPTURED,
-    };
   };
 
   if (persistedTraceContext) {
@@ -2305,6 +2477,39 @@ export async function processChapaWebhook(
   }
 
   return processAttempt();
+}
+
+export async function processChapaWebhook(
+  signature: string | null,
+  payload: unknown,
+  options?: {
+    skipSignatureVerification?: boolean;
+    rawBody?: string;
+  },
+) {
+  const rawBody = options?.rawBody ?? JSON.stringify(payload ?? {});
+
+  if (!options?.skipSignatureVerification) {
+    assertWebhookSignature(signature, rawBody);
+  }
+
+  const callbackInput = toChapaCallbackInput(payload);
+
+  return processChapaTransactionByReference(
+    callbackInput.txRef,
+    callbackInput.providerEventId ?? callbackInput.txRef,
+    payload,
+  );
+}
+
+export async function processChapaCallback(payload: unknown) {
+  const callbackInput = toChapaCallbackInput(payload);
+
+  return processChapaTransactionByReference(
+    callbackInput.txRef,
+    callbackInput.providerEventId ?? callbackInput.txRef,
+    payload,
+  );
 }
 
 export async function retryOrderPayment(
@@ -2352,6 +2557,17 @@ export async function retryOrderPayment(
       "INVALID_STATE",
       "Reservation has expired; create a new reservation before retrying payment.",
     );
+  }
+
+  if (order.status === OrderStatus.FAILED) {
+    await prisma.order.update({
+      where: {
+        id: order.id,
+      },
+      data: {
+        status: OrderStatus.PENDING,
+      },
+    });
   }
 
   return initializeOrderPayment(eventId, orderId, {
@@ -2765,17 +2981,16 @@ export async function reconcilePendingPayments(
       const verified = await verifyChapaPayment(attempt.providerReference);
 
       if (verified.status !== "success" || !verified.data) {
-        await markPaymentFailed(
+        await markPaymentProcessing(
           attempt.id,
-          attempt.orderId,
+          attempt.providerReference,
           attempt.providerReference,
           {
             reconciliation: true,
             reason: "verification_failed",
           },
-          "RECONCILIATION_VERIFICATION_FAILED",
         );
-        failed += 1;
+        unresolved += 1;
         continue;
       }
 
@@ -2804,7 +3019,39 @@ export async function reconcilePendingPayments(
         continue;
       }
 
+      if (isFailedPaymentStatus(status)) {
+        await markPaymentFailed(
+          attempt.id,
+          attempt.orderId,
+          verified.data.tx_ref,
+          {
+            reconciliation: true,
+            reason: "failed_provider_status",
+            status,
+          },
+          `RECONCILIATION_CHAPA_STATUS_${status || "UNKNOWN"}`,
+        );
+        failed += 1;
+        continue;
+      }
+
       if (!isSuccessfulPaymentStatus(status)) {
+        const nonTerminalStatus = isPendingPaymentStatus(status)
+          ? PaymentAttemptStatus.PROCESSING
+          : PaymentAttemptStatus.REQUIRES_ACTION;
+
+        await markPaymentProcessing(
+          attempt.id,
+          verified.data.tx_ref,
+          attempt.providerReference,
+          {
+            reconciliation: true,
+            reason: "non_terminal_provider_status",
+            status,
+          },
+          nonTerminalStatus,
+        );
+
         unresolved += 1;
         continue;
       }
@@ -2833,6 +3080,85 @@ export async function reconcilePendingPayments(
     failed,
     unresolved,
   };
+}
+
+async function cancelExpiredChapaTransactions(eventId?: string) {
+  const attempts = await prisma.paymentAttempt.findMany({
+    where: {
+      provider: "CHAPA",
+      providerReference: {
+        not: null,
+      },
+      status: {
+        in: [
+          PaymentAttemptStatus.INITIATED,
+          PaymentAttemptStatus.PROCESSING,
+          PaymentAttemptStatus.REQUIRES_ACTION,
+          PaymentAttemptStatus.AUTHORIZED,
+        ],
+      },
+      order: {
+        eventId,
+        status: {
+          in: [OrderStatus.PENDING, OrderStatus.FAILED],
+        },
+        reservation: {
+          status: ReservationStatus.EXPIRED,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: "asc",
+    },
+    take: 100,
+  });
+
+  let cancelled = 0;
+
+  for (const attempt of attempts) {
+    if (!attempt.providerReference) {
+      continue;
+    }
+
+    try {
+      const cancellation = await cancelChapaTransaction(attempt.providerReference);
+
+      if (cancellation.status !== "success") {
+        continue;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.paymentAttempt.update({
+          where: {
+            id: attempt.id,
+          },
+          data: {
+            status: PaymentAttemptStatus.VOIDED,
+            failureCode: "EXPIRED_RESERVATION_CANCELLED",
+            callbackPayload: {
+              source: "maintenance",
+              cancellation,
+            } as Prisma.InputJsonValue,
+          },
+        });
+
+        await tx.order.update({
+          where: {
+            id: attempt.orderId,
+          },
+          data: {
+            status: OrderStatus.FAILED,
+          },
+        });
+      });
+
+      cancelled += 1;
+    } catch {
+      continue;
+    }
+  }
+
+  return cancelled;
 }
 
 export async function runTicketingMaintenance(eventId?: string): Promise<TicketingMaintenanceResult> {
@@ -2885,6 +3211,7 @@ export async function runTicketingMaintenance(eventId?: string): Promise<Ticketi
 
   let promotedWaitlistEntries = 0;
   let reconciledPaymentAttempts = 0;
+  const cancelledProviderTransactions = await cancelExpiredChapaTransactions(eventId);
   const rotatedLegacyQrTokens = await rotateLegacyTicketQrTokens(eventId);
 
   if (eventId) {
@@ -2902,5 +3229,6 @@ export async function runTicketingMaintenance(eventId?: string): Promise<Ticketi
     expiredWaitlistClaims,
     reconciledPaymentAttempts,
     rotatedLegacyQrTokens,
+    cancelledProviderTransactions,
   };
 }

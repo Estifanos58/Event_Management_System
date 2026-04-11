@@ -705,6 +705,10 @@ model Refund {
   amount           Decimal      @db.Decimal(12, 2)
   currency         String
   reason           String
+  providerRefundReference String?
+  providerStatus   String?
+  providerResponse Json?
+  failureCode      String?
   status           RefundStatus @default(REQUESTED)
   requestedBy      String
   createdAt        DateTime     @default(now())
@@ -714,6 +718,7 @@ model Refund {
   paymentAttempt PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
 
   @@index([orderId, status])
+  @@index([providerRefundReference])
 }
 
 model Ticket {

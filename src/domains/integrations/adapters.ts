@@ -1,4 +1,4 @@
-import { env } from "@/core/env";
+import { verifyChapaPayloadSignature } from "@/core/chapa/signature";
 import { IntegrationDomainError } from "@/domains/integrations/errors";
 import type { IntegrationProviderType } from "@/domains/integrations/types";
 
@@ -77,7 +77,10 @@ const chapaPaymentAdapter: InboundProviderAdapter = {
   providerType: "PAYMENT",
   provider: "CHAPA",
   verifySignature(input) {
-    return Boolean(input.signature && input.signature === env.CHAPA_WEBHOOK_SECRET);
+    return verifyChapaPayloadSignature({
+      rawBody: input.rawBody,
+      signature: input.signature,
+    });
   },
   extractProviderEventId(payload) {
     if (!isRecord(payload)) {
