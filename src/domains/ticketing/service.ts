@@ -1852,7 +1852,7 @@ export async function initializeOrderPayment(
     callback_url: callbackUrl,
     return_url: returnUrl,
     customization: {
-      title: "Event Ticket Purchase",
+      title: "Ticket Purchase",
       description: `Order ${order.id}`,
     },
     customer: {
