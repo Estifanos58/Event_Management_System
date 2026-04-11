@@ -6,6 +6,7 @@ export type SeedUserProfile = {
   id: string;
   name: string;
   email: string;
+  password: string;
   group: SeedUserGroup;
 };
 

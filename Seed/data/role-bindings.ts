@@ -13,25 +13,27 @@ export function buildRoleBindings(input: {
   const bindings: Prisma.RoleBindingCreateManyInput[] = [];
   let index = 1;
 
-  const superAdmin = input.users.find((user) => user.group === "SUPER_ADMIN");
+  const superAdmins = input.users.filter((user) => user.group === "SUPER_ADMIN");
 
-  if (!superAdmin) {
+  if (superAdmins.length === 0) {
     throw new Error("Missing SUPER_ADMIN seed user.");
   }
 
-  bindings.push({
-    id: ids.roleBinding(index),
-    userId: superAdmin.id,
-    role: Role.SUPER_ADMIN,
-    scopeType: ScopeType.PLATFORM,
-    scopeId: "platform_main",
-    permissions: {
-      allowed: ["*"],
-    },
-    createdAt: subDays(input.now, 180),
-  });
+  superAdmins.forEach((superAdmin, adminOffset) => {
+    bindings.push({
+      id: ids.roleBinding(index),
+      userId: superAdmin.id,
+      role: Role.SUPER_ADMIN,
+      scopeType: ScopeType.PLATFORM,
+      scopeId: "platform_main",
+      permissions: {
+        allowed: ["*"],
+      },
+      createdAt: subDays(input.now, 180 - adminOffset),
+    });
 
-  index += 1;
+    index += 1;
+  });
 
   const organizers = input.users.filter((user) => user.group === "ORGANIZER");
 

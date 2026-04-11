@@ -75,6 +75,8 @@ type EventBlueprint = {
   scenario: SeedEventProfile["scenario"];
 };
 
+const EVENTS_PER_ORGANIZER = 5;
+
 const EVENT_BLUEPRINTS: EventBlueprint[] = [
   {
     title: "Tech Conference 2026",
@@ -239,44 +241,51 @@ export function buildEvents(input: {
   orgIds: string[];
   organizerIds: string[];
 }): EventSeedResult {
-  const profiles: SeedEventProfile[] = EVENT_BLUEPRINTS.map((blueprint, index) => {
-    const sequence = index + 1;
-    const { startAt, endAt } = eventWindow(blueprint.startOffsetDays, blueprint.durationHours);
-    const coverImageUrl = sequence <= 10 ? pickCyclic(eventImages, index) : null;
-    const galleryImages = sequence % 2 === 0 ? pickCyclic(gallerySets, index) : [];
+  const profiles: SeedEventProfile[] = [];
 
-    return {
-      sequence,
-      id: ids.event(sequence),
-      orgId: pickCyclic(input.orgIds, index),
-      createdBy: pickCyclic(input.organizerIds, index),
-      title: blueprint.title,
-      description: blueprint.description,
-      status: blueprint.status,
-      visibility: blueprint.visibility,
-      venueMode: blueprint.venueMode,
-      registrationType: blueprint.registrationType,
-      venueName:
-        blueprint.venueMode === VenueMode.VIRTUAL
-          ? "Online Event"
-          : `${blueprint.title.split(" ")[0]} Convention Center`,
-      venueAddress:
-        blueprint.venueMode === VenueMode.VIRTUAL
-          ? null
-          : `${20 + sequence} Central Avenue`,
-      virtualMeetingUrl:
-        blueprint.venueMode === VenueMode.PHYSICAL
-          ? null
-          : `https://meet.event-demo.local/room/${sequence}`,
-      startAt,
-      endAt,
-      timezone: "Africa/Addis_Ababa",
-      totalCapacity: blueprint.totalCapacity,
-      waitlistEnabled: blueprint.waitlistEnabled,
-      coverImageUrl,
-      galleryImages,
-      scenario: blueprint.scenario,
-    };
+  input.organizerIds.forEach((organizerId, organizerIndex) => {
+    for (let slotIndex = 0; slotIndex < EVENTS_PER_ORGANIZER; slotIndex += 1) {
+      const absoluteIndex = organizerIndex * EVENTS_PER_ORGANIZER + slotIndex;
+      const sequence = absoluteIndex + 1;
+      const blueprint = pickCyclic(EVENT_BLUEPRINTS, absoluteIndex);
+      const { startAt, endAt } = eventWindow(
+        blueprint.startOffsetDays + organizerIndex * 2 + slotIndex,
+        blueprint.durationHours,
+      );
+
+      profiles.push({
+        sequence,
+        id: ids.event(sequence),
+        orgId: pickCyclic(input.orgIds, organizerIndex),
+        createdBy: organizerId,
+        title: `${blueprint.title} - Series ${organizerIndex + 1}-${slotIndex + 1}`,
+        description: `${blueprint.description} Hosted by organizer ${organizerIndex + 1}.`,
+        status: blueprint.status,
+        visibility: blueprint.visibility,
+        venueMode: blueprint.venueMode,
+        registrationType: blueprint.registrationType,
+        venueName:
+          blueprint.venueMode === VenueMode.VIRTUAL
+            ? "Online Event"
+            : `${blueprint.title.split(" ")[0]} Convention Center`,
+        venueAddress:
+          blueprint.venueMode === VenueMode.VIRTUAL
+            ? null
+            : `${20 + sequence} Central Avenue`,
+        virtualMeetingUrl:
+          blueprint.venueMode === VenueMode.PHYSICAL
+            ? null
+            : `https://meet.event-demo.local/room/${sequence}`,
+        startAt,
+        endAt,
+        timezone: "Africa/Addis_Ababa",
+        totalCapacity: blueprint.totalCapacity,
+        waitlistEnabled: blueprint.waitlistEnabled,
+        coverImageUrl: pickCyclic(eventImages, absoluteIndex),
+        galleryImages: absoluteIndex % 2 === 0 ? pickCyclic(gallerySets, absoluteIndex) : [],
+        scenario: blueprint.scenario,
+      });
+    }
   });
 
   const events: Prisma.EventCreateManyInput[] = profiles.map((profile, index) => ({
@@ -330,12 +339,12 @@ export function buildEvents(input: {
     profiles,
     events,
     scenarioEventIds: {
-      soldOut: ids.event(1),
-      live: ids.event(2),
-      completed: ids.event(3),
-      cancelled: ids.event(4),
-      privateEvent: ids.event(5),
-      virtualEvent: ids.event(6),
+      soldOut: profiles.find((profile) => profile.scenario === "SOLD_OUT")?.id ?? ids.event(1),
+      live: profiles.find((profile) => profile.scenario === "LIVE")?.id ?? ids.event(2),
+      completed: profiles.find((profile) => profile.scenario === "COMPLETED")?.id ?? ids.event(3),
+      cancelled: profiles.find((profile) => profile.scenario === "CANCELLED")?.id ?? ids.event(4),
+      privateEvent: profiles.find((profile) => profile.scenario === "PRIVATE")?.id ?? ids.event(5),
+      virtualEvent: profiles.find((profile) => profile.scenario === "VIRTUAL")?.id ?? ids.event(6),
     },
   };
 }
