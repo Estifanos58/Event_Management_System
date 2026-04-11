@@ -1,4 +1,5 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AdminFinanceCharts } from "@/components/admin/charts/admin-finance-charts";
 import { prisma } from "@/core/db/prisma";
 
 function toNumber(value: unknown) {
@@ -96,6 +97,44 @@ export default async function AdminFinancePage() {
   const refundedAmount = toNumber(refundTotals._sum.amount);
   const payoutAmount = toNumber(payoutTotals._sum.amount);
 
+  const paymentStatusChart = paymentByStatus
+    .map((row) => ({
+      status: row.status,
+      attempts: row._count._all,
+      amount: toNumber(row._sum.amount),
+    }))
+    .sort((left, right) => right.attempts - left.attempts);
+
+  const cashflowBreakdown = [
+    {
+      label: "Gross Orders",
+      value: completedGross,
+    },
+    {
+      label: "Platform Fees",
+      value: platformFees,
+    },
+    {
+      label: "Processor Fees",
+      value: processorFees,
+    },
+    {
+      label: "Refunded",
+      value: refundedAmount,
+    },
+    {
+      label: "Payouts",
+      value: payoutAmount,
+    },
+  ];
+
+  const disputeBreakdown = disputeCases
+    .map((risk) => ({
+      label: risk.status,
+      value: risk._count._all,
+    }))
+    .sort((left, right) => right.value - left.value);
+
   return (
     <div className="space-y-6">
       <Card>
@@ -131,6 +170,12 @@ export default async function AdminFinancePage() {
           </div>
         </CardContent>
       </Card>
+
+      <AdminFinanceCharts
+        paymentStatus={paymentStatusChart}
+        cashflowBreakdown={cashflowBreakdown}
+        disputeBreakdown={disputeBreakdown}
+      />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>

@@ -1,13 +1,41 @@
+import { CheckInStatus, PaymentAttemptStatus } from "@prisma/client";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AdminReportsCharts } from "@/components/admin/charts/admin-reports-charts";
 import { prisma } from "@/core/db/prisma";
 import { collectOperationalMetricsSnapshot } from "@/core/ops/metrics-snapshot";
+
+const TREND_DAYS = 30;
+
+function toDayKey(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function toDayLabel(date: Date) {
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
 
 export default async function AdminReportsPage() {
   const snapshot = await collectOperationalMetricsSnapshot();
   const generatedAt = new Date(snapshot.generatedAt);
   const windowStart = new Date(generatedAt.getTime() - snapshot.windowMinutes * 60_000);
+  const trendStart = new Date();
+  trendStart.setDate(trendStart.getDate() - (TREND_DAYS - 1));
+  trendStart.setHours(0, 0, 0, 0);
 
-  const [ordersInWindow, paymentsInWindow, checkInsInWindow, exportsInWindow] = await Promise.all([
+  const [
+    ordersInWindow,
+    paymentsInWindow,
+    checkInsInWindow,
+    exportsInWindow,
+    ordersInTrend,
+    paymentsInTrend,
+    checkinsInTrend,
+    exportsInTrend,
+    providerRegionPayments,
+  ] = await Promise.all([
     prisma.order.count({
       where: {
         createdAt: {
@@ -36,7 +64,190 @@ export default async function AdminReportsPage() {
         },
       },
     }),
+    prisma.order.findMany({
+      where: {
+        createdAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        createdAt: true,
+      },
+    }),
+    prisma.paymentAttempt.findMany({
+      where: {
+        createdAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        createdAt: true,
+        status: true,
+      },
+    }),
+    prisma.checkInEvent.findMany({
+      where: {
+        scannedAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        scannedAt: true,
+        status: true,
+      },
+    }),
+    prisma.dataExportJob.findMany({
+      where: {
+        createdAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        createdAt: true,
+      },
+    }),
+    prisma.paymentAttempt.findMany({
+      where: {
+        updatedAt: {
+          gte: trendStart,
+        },
+        status: {
+          in: [PaymentAttemptStatus.CAPTURED, PaymentAttemptStatus.FAILED],
+        },
+      },
+      select: {
+        provider: true,
+        status: true,
+        order: {
+          select: {
+            event: {
+              select: {
+                organization: {
+                  select: {
+                    region: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
   ]);
+
+  const trendSeed = new Map<
+    string,
+    {
+      day: string;
+      orders: number;
+      payments: number;
+      checkins: number;
+      exports: number;
+      totalOps: number;
+      failedPayments: number;
+      rejectedCheckins: number;
+    }
+  >();
+
+  for (let index = 0; index < TREND_DAYS; index += 1) {
+    const date = new Date(trendStart);
+    date.setDate(trendStart.getDate() + index);
+
+    trendSeed.set(toDayKey(date), {
+      day: toDayLabel(date),
+      orders: 0,
+      payments: 0,
+      checkins: 0,
+      exports: 0,
+      totalOps: 0,
+      failedPayments: 0,
+      rejectedCheckins: 0,
+    });
+  }
+
+  for (const order of ordersInTrend) {
+    const bucket = trendSeed.get(toDayKey(order.createdAt));
+    if (!bucket) {
+      continue;
+    }
+
+    bucket.orders += 1;
+    bucket.totalOps += 1;
+  }
+
+  for (const payment of paymentsInTrend) {
+    const bucket = trendSeed.get(toDayKey(payment.createdAt));
+    if (!bucket) {
+      continue;
+    }
+
+    bucket.payments += 1;
+    bucket.totalOps += 1;
+
+    if (payment.status === PaymentAttemptStatus.FAILED) {
+      bucket.failedPayments += 1;
+    }
+  }
+
+  for (const checkin of checkinsInTrend) {
+    const bucket = trendSeed.get(toDayKey(checkin.scannedAt));
+    if (!bucket) {
+      continue;
+    }
+
+    bucket.checkins += 1;
+    bucket.totalOps += 1;
+
+    if (checkin.status === CheckInStatus.REJECTED) {
+      bucket.rejectedCheckins += 1;
+    }
+  }
+
+  for (const exportJob of exportsInTrend) {
+    const bucket = trendSeed.get(toDayKey(exportJob.createdAt));
+    if (!bucket) {
+      continue;
+    }
+
+    bucket.exports += 1;
+    bucket.totalOps += 1;
+  }
+
+  const providerRegionMap = new Map<
+    string,
+    {
+      label: string;
+      success: number;
+      failure: number;
+    }
+  >();
+
+  for (const attempt of providerRegionPayments) {
+    const region = attempt.order.event.organization.region || "UNKNOWN";
+    const label = `${attempt.provider}-${region}`;
+    const record = providerRegionMap.get(label) ?? {
+      label,
+      success: 0,
+      failure: 0,
+    };
+
+    if (attempt.status === PaymentAttemptStatus.CAPTURED) {
+      record.success += 1;
+    } else {
+      record.failure += 1;
+    }
+
+    providerRegionMap.set(label, record);
+  }
+
+  const providerRegionPerformance = Array.from(providerRegionMap.values())
+    .sort((left, right) => {
+      const leftTotal = left.success + left.failure;
+      const rightTotal = right.success + right.failure;
+
+      return rightTotal - leftTotal;
+    })
+    .slice(0, 8);
 
   return (
     <div className="space-y-6">
@@ -92,6 +303,11 @@ export default async function AdminReportsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <AdminReportsCharts
+        dailyVolumes={Array.from(trendSeed.values())}
+        providerRegionPerformance={providerRegionPerformance}
+      />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>

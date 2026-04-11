@@ -1,4 +1,5 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AdminSystemCharts } from "@/components/admin/charts/admin-system-charts";
 import { prisma } from "@/core/db/prisma";
 import { collectOperationalMetricsSnapshot } from "@/core/ops/metrics-snapshot";
 import { listRunbookHooks } from "@/core/ops/runbook-hooks";
@@ -26,6 +27,42 @@ export default async function AdminSystemPage() {
         },
       }),
     ]);
+
+  const healthPenalty =
+    Math.min(26, snapshot.dependencies.sustainedFailureCount * 2) +
+    Math.min(24, snapshot.webhooks.pendingBacklogCount / 25) +
+    Math.min(20, snapshot.webhooks.deadLetterCount) +
+    Math.min(20, snapshot.checkin.apiErrorRate * 100 * 2) +
+    Math.min(10, snapshot.inventory.driftViolationCount * 2);
+
+  const healthScore = Math.max(0, Math.min(100, 100 - healthPenalty));
+
+  const systemSignals = [
+    {
+      label: "Webhook Pending",
+      value: pendingOutboxCount,
+    },
+    {
+      label: "Dead Letters",
+      value: snapshot.webhooks.deadLetterCount,
+    },
+    {
+      label: "Inbound Failed",
+      value: failedInboundCount,
+    },
+    {
+      label: "Dependency Failures",
+      value: snapshot.dependencies.sustainedFailureCount,
+    },
+    {
+      label: "Inventory Drift",
+      value: snapshot.inventory.driftViolationCount,
+    },
+    {
+      label: "Stuck Orders",
+      value: snapshot.ticketing.stuckOrderCount,
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -60,6 +97,16 @@ export default async function AdminSystemPage() {
           </div>
         </CardContent>
       </Card>
+
+      <AdminSystemCharts
+        healthScore={healthScore}
+        checkInBreakdown={{
+          accepted: snapshot.checkin.acceptedCount,
+          rejected: snapshot.checkin.rejectedCount,
+          duplicate: snapshot.checkin.duplicateCount,
+        }}
+        systemSignals={systemSignals}
+      />
 
       <Card>
         <CardHeader>

@@ -71,7 +71,7 @@ export default async function OrganizerEventAnalyticsPage({
   windowStart.setDate(windowStart.getDate() - (WINDOW_DAYS - 1));
   windowStart.setHours(0, 0, 0, 0);
 
-  const [orders, tickets, checkIns] = await Promise.all([
+  const [orders, tickets, checkIns, orderStatusRows] = await Promise.all([
     prisma.order.findMany({
       where: {
         eventId,
@@ -106,6 +106,18 @@ export default async function OrganizerEventAnalyticsPage({
       },
       select: {
         scannedAt: true,
+      },
+    }),
+    prisma.order.groupBy({
+      by: ["status"],
+      where: {
+        eventId,
+        createdAt: {
+          gte: windowStart,
+        },
+      },
+      _count: {
+        _all: true,
       },
     }),
   ]);
@@ -169,6 +181,20 @@ export default async function OrganizerEventAnalyticsPage({
   const totalTickets = chartData.reduce((sum, point) => sum + point.tickets, 0);
   const totalCheckIns = chartData.reduce((sum, point) => sum + point.checkins, 0);
   const checkInConversion = totalTickets > 0 ? (totalCheckIns / totalTickets) * 100 : 0;
+  const orderStatusBreakdown = orderStatusRows.map((row) => ({
+    label: row.status,
+    value: row._count._all,
+  }));
+  const attendanceBreakdown = [
+    {
+      label: "Checked In",
+      value: totalCheckIns,
+    },
+    {
+      label: "Not Checked In",
+      value: Math.max(totalTickets - totalCheckIns, 0),
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -206,7 +232,11 @@ export default async function OrganizerEventAnalyticsPage({
         </CardContent>
       </Card>
 
-      <EventAnalyticsCharts data={chartData} />
+      <EventAnalyticsCharts
+        data={chartData}
+        orderStatusBreakdown={orderStatusBreakdown}
+        attendanceBreakdown={attendanceBreakdown}
+      />
     </div>
   );
 }

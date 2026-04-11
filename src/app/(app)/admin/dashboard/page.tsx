@@ -1,7 +1,25 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AdminDashboardCharts } from "@/components/admin/charts/admin-dashboard-charts";
 import { prisma } from "@/core/db/prisma";
 
+const TREND_DAYS = 30;
+
+function toDayKey(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function toDayLabel(date: Date) {
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export default async function AdminDashboardPage() {
+  const trendStart = new Date();
+  trendStart.setDate(trendStart.getDate() - (TREND_DAYS - 1));
+  trendStart.setHours(0, 0, 0, 0);
+
   const [
     usersCount,
     organizationsCount,
@@ -9,6 +27,12 @@ export default async function AdminDashboardPage() {
     activeSessionsCount,
     recentAuditEvents,
     newestUsers,
+    usersInTrend,
+    eventsInTrend,
+    sessionsInTrend,
+    eventStatusRows,
+    auditActionsInTrend,
+    verificationRows,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.organization.count(),
@@ -54,7 +78,125 @@ export default async function AdminDashboardPage() {
         emailVerified: true,
       },
     }),
+    prisma.user.findMany({
+      where: {
+        createdAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        createdAt: true,
+      },
+    }),
+    prisma.event.findMany({
+      where: {
+        createdAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        createdAt: true,
+      },
+    }),
+    prisma.session.findMany({
+      where: {
+        createdAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        createdAt: true,
+      },
+    }),
+    prisma.event.groupBy({
+      by: ["status"],
+      _count: {
+        _all: true,
+      },
+    }),
+    prisma.auditEvent.findMany({
+      where: {
+        createdAt: {
+          gte: trendStart,
+        },
+      },
+      select: {
+        action: true,
+      },
+    }),
+    prisma.user.groupBy({
+      by: ["emailVerified"],
+      _count: {
+        _all: true,
+      },
+    }),
   ]);
+
+  const growthSeed = new Map<
+    string,
+    {
+      day: string;
+      users: number;
+      events: number;
+      sessions: number;
+    }
+  >();
+
+  for (let index = 0; index < TREND_DAYS; index += 1) {
+    const date = new Date(trendStart);
+    date.setDate(trendStart.getDate() + index);
+
+    growthSeed.set(toDayKey(date), {
+      day: toDayLabel(date),
+      users: 0,
+      events: 0,
+      sessions: 0,
+    });
+  }
+
+  for (const user of usersInTrend) {
+    const bucket = growthSeed.get(toDayKey(user.createdAt));
+    if (bucket) {
+      bucket.users += 1;
+    }
+  }
+
+  for (const event of eventsInTrend) {
+    const bucket = growthSeed.get(toDayKey(event.createdAt));
+    if (bucket) {
+      bucket.events += 1;
+    }
+  }
+
+  for (const session of sessionsInTrend) {
+    const bucket = growthSeed.get(toDayKey(session.createdAt));
+    if (bucket) {
+      bucket.sessions += 1;
+    }
+  }
+
+  const eventStatusBreakdown = eventStatusRows.map((row) => ({
+    label: row.status,
+    value: row._count._all,
+  }));
+
+  const auditActionCount = new Map<string, number>();
+  for (const audit of auditActionsInTrend) {
+    auditActionCount.set(audit.action, (auditActionCount.get(audit.action) ?? 0) + 1);
+  }
+
+  const auditActionBreakdown = Array.from(auditActionCount.entries())
+    .map(([label, value]) => ({
+      label,
+      value,
+    }))
+    .sort((left, right) => right.value - left.value)
+    .slice(0, 6);
+
+  const verifiedUsers =
+    verificationRows.find((row) => row.emailVerified)?._count._all ?? 0;
+  const unverifiedUsers =
+    verificationRows.find((row) => !row.emailVerified)?._count._all ?? 0;
 
   return (
     <div className="space-y-8">
@@ -95,6 +237,16 @@ export default async function AdminDashboardPage() {
             </CardContent>
           </Card>
         </section>
+
+        <AdminDashboardCharts
+          growthTrend={Array.from(growthSeed.values())}
+          eventStatusBreakdown={eventStatusBreakdown}
+          auditActionBreakdown={auditActionBreakdown}
+          emailVerification={{
+            verified: verifiedUsers,
+            unverified: unverifiedUsers,
+          }}
+        />
 
         <section className="grid gap-6 xl:grid-cols-2">
           <Card>

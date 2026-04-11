@@ -1,7 +1,22 @@
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { OrganizerDashboardCharts } from "@/components/organizer/analytics/organizer-dashboard-charts";
+import { prisma } from "@/core/db/prisma";
 import { getEventsOverviewSnapshot } from "@/domains/events/service";
 import { listMyNotifications } from "@/domains/notifications/service";
+
+const TREND_DAYS = 30;
+
+function toDayKey(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function toDayLabel(date: Date) {
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
 
 export default async function OrganizerDashboardPage() {
   const [overview, notifications] = await Promise.all([
@@ -20,11 +35,186 @@ export default async function OrganizerDashboardPage() {
   }
 
   const now = new Date();
+  const trendStart = new Date();
+  trendStart.setDate(trendStart.getDate() - (TREND_DAYS - 1));
+  trendStart.setHours(0, 0, 0, 0);
+
   const totalEvents = overview.events.length;
   const upcomingEvents = overview.events.filter((event) => event.startAt >= now);
   const liveEvents = overview.events.filter((event) => event.status === "LIVE");
   const publishedEvents = overview.events.filter((event) => event.status === "PUBLISHED");
   const pausedSalesEvents = overview.events.filter((event) => event.ticketSalesPaused);
+  const eventIds = overview.events.map((event) => event.id);
+
+  const [ordersInTrend, ticketsInTrend, checkinsInTrend] =
+    eventIds.length > 0
+      ? await Promise.all([
+          prisma.order.findMany({
+            where: {
+              eventId: {
+                in: eventIds,
+              },
+              status: "COMPLETED",
+              completedAt: {
+                gte: trendStart,
+              },
+            },
+            select: {
+              eventId: true,
+              completedAt: true,
+              totalAmount: true,
+              currency: true,
+            },
+          }),
+          prisma.ticket.findMany({
+            where: {
+              eventId: {
+                in: eventIds,
+              },
+              issuedAt: {
+                gte: trendStart,
+              },
+            },
+            select: {
+              eventId: true,
+              issuedAt: true,
+            },
+          }),
+          prisma.checkInEvent.findMany({
+            where: {
+              eventId: {
+                in: eventIds,
+              },
+              status: "ACCEPTED",
+              scannedAt: {
+                gte: trendStart,
+              },
+            },
+            select: {
+              eventId: true,
+              scannedAt: true,
+            },
+          }),
+        ])
+      : [[], [], []];
+
+  const trendSeed = new Map<
+    string,
+    {
+      day: string;
+      revenue: number;
+      orders: number;
+      tickets: number;
+      checkins: number;
+    }
+  >();
+
+  for (let index = 0; index < TREND_DAYS; index += 1) {
+    const date = new Date(trendStart);
+    date.setDate(trendStart.getDate() + index);
+
+    trendSeed.set(toDayKey(date), {
+      day: toDayLabel(date),
+      revenue: 0,
+      orders: 0,
+      tickets: 0,
+      checkins: 0,
+    });
+  }
+
+  const eventMetricMap = new Map<
+    string,
+    {
+      label: string;
+      revenue: number;
+      orders: number;
+      checkins: number;
+    }
+  >();
+
+  for (const event of overview.events) {
+    eventMetricMap.set(event.id, {
+      label: event.title,
+      revenue: 0,
+      orders: 0,
+      checkins: 0,
+    });
+  }
+
+  for (const order of ordersInTrend) {
+    if (!order.completedAt) {
+      continue;
+    }
+
+    const bucket = trendSeed.get(toDayKey(order.completedAt));
+    if (bucket) {
+      bucket.orders += 1;
+      bucket.revenue += Number(order.totalAmount);
+    }
+
+    const metric = eventMetricMap.get(order.eventId);
+    if (metric) {
+      metric.orders += 1;
+      metric.revenue += Number(order.totalAmount);
+    }
+  }
+
+  for (const ticket of ticketsInTrend) {
+    const bucket = trendSeed.get(toDayKey(ticket.issuedAt));
+    if (bucket) {
+      bucket.tickets += 1;
+    }
+  }
+
+  for (const checkin of checkinsInTrend) {
+    const bucket = trendSeed.get(toDayKey(checkin.scannedAt));
+    if (bucket) {
+      bucket.checkins += 1;
+    }
+
+    const metric = eventMetricMap.get(checkin.eventId);
+    if (metric) {
+      metric.checkins += 1;
+    }
+  }
+
+  const eventStatusCount = new Map<string, number>();
+  for (const event of overview.events) {
+    eventStatusCount.set(event.status, (eventStatusCount.get(event.status) ?? 0) + 1);
+  }
+
+  const eventStatusBreakdown = Array.from(eventStatusCount.entries()).map(([status, value]) => ({
+    status,
+    value,
+  }));
+
+  const topEvents = Array.from(eventMetricMap.values())
+    .sort((left, right) => {
+      if (right.revenue !== left.revenue) {
+        return right.revenue - left.revenue;
+      }
+
+      if (right.orders !== left.orders) {
+        return right.orders - left.orders;
+      }
+
+      return right.checkins - left.checkins;
+    })
+    .slice(0, 8);
+
+  const totals = Array.from(trendSeed.values()).reduce(
+    (sum, day) => {
+      sum.tickets += day.tickets;
+      sum.checkins += day.checkins;
+      return sum;
+    },
+    {
+      tickets: 0,
+      checkins: 0,
+    },
+  );
+
+  const currency = ordersInTrend[0]?.currency ?? "USD";
 
   return (
     <div className="space-y-8">
@@ -73,6 +263,17 @@ export default async function OrganizerDashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      <OrganizerDashboardCharts
+        currency={currency}
+        dailyTrend={Array.from(trendSeed.values())}
+        eventStatusBreakdown={eventStatusBreakdown}
+        topEvents={topEvents}
+        conversion={{
+          tickets: totals.tickets,
+          checkins: totals.checkins,
+        }}
+      />
 
       <div className="grid gap-6 lg:grid-cols-[1.35fr_1fr]">
         <Card>
