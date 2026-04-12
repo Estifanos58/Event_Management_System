@@ -1,11 +1,19 @@
 declare module "better-auth/next-js" {
-  export function nextCookies(): any;
+  type BetterAuthPlugin = import("better-auth").BetterAuthPlugin;
+  type NextRouteHandler = (request: Request) => Response | Promise<Response>;
+  type NextAuthHandlerInput =
+    | {
+        handler: NextRouteHandler;
+      }
+    | NextRouteHandler;
 
-  export function toNextJsHandler(auth: any): {
-    GET: (request: Request) => Response | Promise<Response>;
-    POST: (request: Request) => Response | Promise<Response>;
-    PUT: (request: Request) => Response | Promise<Response>;
-    PATCH: (request: Request) => Response | Promise<Response>;
-    DELETE: (request: Request) => Response | Promise<Response>;
+  export function nextCookies(): BetterAuthPlugin;
+
+  export function toNextJsHandler(auth: NextAuthHandlerInput): {
+    GET: NextRouteHandler;
+    POST: NextRouteHandler;
+    PUT: NextRouteHandler;
+    PATCH: NextRouteHandler;
+    DELETE: NextRouteHandler;
   };
 }
