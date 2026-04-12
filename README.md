@@ -38,6 +38,13 @@ Notes:
 - Start the worker to process notification deliveries: `npm run worker`.
 - Notification emails are queued and retried using the `NotificationDelivery` pipeline.
 
+Staging and production checklist:
+
+- Run a dedicated worker process in the deployment (separate from web process) so queued deliveries leave `PENDING`.
+- Verify `GMAIL_SMTP_USER` and `GMAIL_SMTP_APP_PASSWORD` are defined in the worker environment.
+- Trigger a test notification and confirm `NotificationDelivery` progresses from `PENDING` to `SENT`.
+- If delivery fails, inspect `failureReason` and attempt history from the Notifications page.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More
