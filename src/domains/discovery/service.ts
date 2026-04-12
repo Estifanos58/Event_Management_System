@@ -15,12 +15,16 @@ import { writeAuditEvent } from "@/core/audit/audit";
 import { getServerSessionOrNull } from "@/core/auth/session";
 import { prisma } from "@/core/db/prisma";
 import { DiscoveryDomainError } from "@/domains/discovery/errors";
+import { findBlockingUserBanForOrganization } from "@/domains/moderation/service";
 import type {
   DiscoverableEventDetail,
   DiscoveryAvailabilitySnapshot,
   DiscoveryEventCard,
+  DiscoveryEventFeedbackState,
+  DiscoveryFeedbackEntry,
   DiscoveryFeedbackEligibility,
   DiscoveryFeedbackInput,
+  DiscoveryFeedbackQueryInput,
   DiscoveryFeedbackSummary,
   DiscoveryListResult,
   DiscoveryQueryInput,
@@ -104,6 +108,11 @@ const feedbackInputSchema = z.object({
     .optional(),
 });
 
+const feedbackQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(20).optional(),
+});
+
 type DiscoveryEventRow = Prisma.EventGetPayload<{
   include: {
     organization: {
@@ -145,6 +154,23 @@ type UserBehaviorProfile = {
   preferredOrganizerIds: Set<string>;
   interestTokens: Set<string>;
 };
+
+type FeedbackEntryRow = Prisma.FeedbackGetPayload<{
+  select: {
+    id: true;
+    userId: true;
+    rating: true;
+    reviewText: true;
+    createdAt: true;
+    user: {
+      select: {
+        id: true;
+        name: true;
+        image: true;
+      };
+    };
+  };
+}>;
 
 function now() {
   return new Date();
@@ -618,6 +644,15 @@ function parseFeedbackInput(input: unknown) {
     rating: parsed.rating,
     reviewText: normalizeOptionalText(parsed.reviewText),
     tags: uniqueStrings((parsed.tags ?? []).map((tag) => tag.trim().toLowerCase())),
+  };
+}
+
+function parseFeedbackQueryInput(input: DiscoveryFeedbackQueryInput | undefined) {
+  const parsed = feedbackQuerySchema.parse(input ?? {});
+
+  return {
+    page: parsed.page ?? 1,
+    pageSize: parsed.pageSize ?? 10,
   };
 }
 
@@ -1142,6 +1177,7 @@ async function getFeedbackEligibilityForUser(eventId: string, userId: string): P
       },
       select: {
         id: true,
+        orgId: true,
         status: true,
         endAt: true,
       },
@@ -1171,6 +1207,17 @@ async function getFeedbackEligibilityForUser(eventId: string, userId: string): P
 
   if (!event) {
     throw new DiscoveryDomainError(404, "EVENT_NOT_FOUND", "Event not found.");
+  }
+
+  const blockingBan = await findBlockingUserBanForOrganization(event.orgId, userId);
+
+  if (blockingBan) {
+    return {
+      eligible: false,
+      reasonCode: "BANNED",
+      reason: "You are currently restricted from posting feedback for this event.",
+      alreadySubmitted: Boolean(existingFeedback),
+    };
   }
 
   if (event.endAt.getTime() > now().getTime() && event.status !== EventStatus.COMPLETED && event.status !== EventStatus.ARCHIVED) {
@@ -1260,6 +1307,145 @@ async function getFeedbackSummary(eventId: string): Promise<DiscoveryFeedbackSum
     ratingAverage: roundCurrency(aggregate._avg.rating ?? 0),
     ratingCount: aggregate._count._all,
     tagFrequency,
+  };
+}
+
+function toDiscoveryFeedbackEntry(feedback: FeedbackEntryRow): DiscoveryFeedbackEntry {
+  return {
+    id: feedback.id,
+    userId: feedback.userId,
+    userName: feedback.user.name,
+    userImageUrl: feedback.user.image,
+    rating: feedback.rating,
+    reviewText: feedback.reviewText,
+    createdAt: feedback.createdAt.toISOString(),
+  };
+}
+
+async function listEventFeedbackEntriesPage(
+  eventId: string,
+  input: { page: number; pageSize: number },
+) {
+  const total = await prisma.feedback.count({
+    where: {
+      eventId,
+    },
+  });
+
+  const totalPages = Math.max(1, Math.ceil(total / input.pageSize));
+  const page = Math.min(input.page, totalPages);
+  const skip = (page - 1) * input.pageSize;
+
+  const feedbacks = await prisma.feedback.findMany({
+    where: {
+      eventId,
+    },
+    select: {
+      id: true,
+      userId: true,
+      rating: true,
+      reviewText: true,
+      createdAt: true,
+      user: {
+        select: {
+          id: true,
+          name: true,
+          image: true,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
+    skip,
+    take: input.pageSize,
+  });
+
+  return {
+    entries: feedbacks.map((feedback) => toDiscoveryFeedbackEntry(feedback)),
+    page,
+    pageSize: input.pageSize,
+    total,
+    totalPages,
+  };
+}
+
+async function getViewerFeedbackEntry(
+  eventId: string,
+  userId: string,
+): Promise<DiscoveryFeedbackEntry | null> {
+  const feedback = await prisma.feedback.findUnique({
+    where: {
+      eventId_userId: {
+        eventId,
+        userId,
+      },
+    },
+    select: {
+      id: true,
+      userId: true,
+      rating: true,
+      reviewText: true,
+      createdAt: true,
+      user: {
+        select: {
+          id: true,
+          name: true,
+          image: true,
+        },
+      },
+    },
+  });
+
+  return feedback ? toDiscoveryFeedbackEntry(feedback) : null;
+}
+
+async function buildEventFeedbackState(
+  eventId: string,
+  userId: string | null,
+  query: { page: number; pageSize: number },
+): Promise<DiscoveryEventFeedbackState> {
+  const [feedbackSummary, entriesPage] = await Promise.all([
+    getFeedbackSummary(eventId),
+    listEventFeedbackEntriesPage(eventId, query),
+  ]);
+
+  if (!userId) {
+    return {
+      feedbackSummary,
+      feedbackEligibility: {
+        eligible: false,
+        reasonCode: "SIGN_IN_REQUIRED",
+        reason: "Sign in to check feedback eligibility.",
+        alreadySubmitted: false,
+      },
+      entries: entriesPage.entries,
+      entryPagination: {
+        page: entriesPage.page,
+        pageSize: entriesPage.pageSize,
+        total: entriesPage.total,
+        totalPages: entriesPage.totalPages,
+      },
+      viewerFeedback: null,
+    };
+  }
+
+  const [feedbackEligibility, viewerFeedback] = await Promise.all([
+    getFeedbackEligibilityForUser(eventId, userId),
+    getViewerFeedbackEntry(eventId, userId),
+  ]);
+
+  return {
+    feedbackSummary,
+    feedbackEligibility,
+    entries: entriesPage.entries,
+    entryPagination: {
+      page: entriesPage.page,
+      pageSize: entriesPage.pageSize,
+      total: entriesPage.total,
+      totalPages: entriesPage.totalPages,
+    },
+    viewerFeedback,
   };
 }
 
@@ -1582,23 +1768,17 @@ export async function getDiscoverableEventDetail(
     return null;
   }
 
-  const [availability, feedbackSummary, reputation, session] = await Promise.all([
+  const session = await getServerSessionOrNull().catch(() => null);
+
+  const [availability, feedbackState, reputation] = await Promise.all([
     getEventAvailabilitySnapshot(event.id),
-    getFeedbackSummary(event.id),
+    buildEventFeedbackState(
+      event.id,
+      session?.user.id ?? null,
+      parseFeedbackQueryInput(undefined),
+    ),
     getEventReputationSnapshot(event.id),
-    getServerSessionOrNull().catch(() => null),
   ]);
-
-  let feedbackEligibility: DiscoveryFeedbackEligibility = {
-    eligible: false,
-    reasonCode: "SIGN_IN_REQUIRED",
-    reason: "Sign in to check feedback eligibility.",
-    alreadySubmitted: false,
-  };
-
-  if (session) {
-    feedbackEligibility = await getFeedbackEligibilityForUser(event.id, session.user.id);
-  }
 
   return {
     id: event.id,
@@ -1637,8 +1817,11 @@ export async function getDiscoverableEventDetail(
       capacity: ticketClass.capacity,
     })),
     availability,
-    feedbackSummary,
-    feedbackEligibility,
+    feedbackSummary: feedbackState.feedbackSummary,
+    feedbackEligibility: feedbackState.feedbackEligibility,
+    feedbackEntries: feedbackState.entries,
+    feedbackEntryPagination: feedbackState.entryPagination,
+    viewerFeedback: feedbackState.viewerFeedback,
     reputation,
   };
 }
@@ -1847,7 +2030,10 @@ export async function getDiscoveryRecommendations(
   };
 }
 
-export async function getEventFeedbackStatus(eventId: string) {
+export async function getEventFeedbackStatus(
+  eventId: string,
+  query?: DiscoveryFeedbackQueryInput,
+) {
   const event = await prisma.event.findFirst({
     where: {
       id: eventId,
@@ -1867,29 +2053,13 @@ export async function getEventFeedbackStatus(eventId: string) {
     throw new DiscoveryDomainError(404, "EVENT_NOT_FOUND", "Event not found.");
   }
 
-  const [feedbackSummary, session] = await Promise.all([
-    getFeedbackSummary(eventId),
-    getServerSessionOrNull().catch(() => null),
-  ]);
+  const session = await getServerSessionOrNull().catch(() => null);
 
-  if (!session) {
-    return {
-      feedbackSummary,
-      feedbackEligibility: {
-        eligible: false,
-        reasonCode: "SIGN_IN_REQUIRED",
-        reason: "Sign in to check feedback eligibility.",
-        alreadySubmitted: false,
-      } satisfies DiscoveryFeedbackEligibility,
-    };
-  }
-
-  const feedbackEligibility = await getFeedbackEligibilityForUser(eventId, session.user.id);
-
-  return {
-    feedbackSummary,
-    feedbackEligibility,
-  };
+  return buildEventFeedbackState(
+    eventId,
+    session?.user.id ?? null,
+    parseFeedbackQueryInput(query),
+  );
 }
 
 export async function submitEventFeedback(eventId: string, input: DiscoveryFeedbackInput) {
@@ -2008,6 +2178,98 @@ export async function submitEventFeedback(eventId: string, input: DiscoveryFeedb
 
   return {
     feedback,
+    reputation,
+  };
+}
+
+export async function deleteMyEventFeedback(eventId: string) {
+  const session = await getServerSessionOrNull();
+
+  if (!session) {
+    throw new DiscoveryDomainError(401, "UNAUTHORIZED", "Authentication is required.");
+  }
+
+  const event = await prisma.event.findFirst({
+    where: {
+      id: eventId,
+      visibility: {
+        in: [...DISCOVERY_VISIBILITY],
+      },
+      status: {
+        in: [...DISCOVERY_DETAIL_STATUSES],
+      },
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!event) {
+    throw new DiscoveryDomainError(404, "EVENT_NOT_FOUND", "Event not found.");
+  }
+
+  const existingFeedback = await prisma.feedback.findUnique({
+    where: {
+      eventId_userId: {
+        eventId,
+        userId: session.user.id,
+      },
+    },
+    select: {
+      id: true,
+      rating: true,
+      reviewText: true,
+      tags: true,
+    },
+  });
+
+  if (!existingFeedback) {
+    throw new DiscoveryDomainError(404, "FEEDBACK_NOT_FOUND", "Feedback not found.");
+  }
+
+  await prisma.feedback.delete({
+    where: {
+      eventId_userId: {
+        eventId,
+        userId: session.user.id,
+      },
+    },
+  });
+
+  const reputation = await getEventReputationSnapshot(eventId);
+
+  await writeAuditEvent({
+    actorId: session.user.id,
+    action: "feedback.deleted",
+    scopeType: ScopeType.EVENT,
+    scopeId: eventId,
+    targetType: "Feedback",
+    targetId: existingFeedback.id,
+    oldValue: {
+      rating: existingFeedback.rating,
+      reviewText: existingFeedback.reviewText,
+      tags: existingFeedback.tags,
+    },
+  });
+
+  await writeAuditEvent({
+    actorId: session.user.id,
+    action: "reputation.event.recalculated",
+    scopeType: ScopeType.EVENT,
+    scopeId: eventId,
+    targetType: "Event",
+    targetId: eventId,
+    newValue: {
+      eventReputationScore: reputation.eventReputationScore,
+      organizerReputationScore: reputation.organizerReputationScore,
+      ratingAverage: reputation.ratingAverage,
+      ratingCount: reputation.ratingCount,
+      attendanceRate: reputation.attendanceRate,
+    },
+  });
+
+  return {
+    deletedFeedbackId: existingFeedback.id,
     reputation,
   };
 }

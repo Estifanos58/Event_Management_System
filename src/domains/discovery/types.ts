@@ -36,6 +36,11 @@ export type DiscoveryFeedbackInput = {
   tags?: unknown;
 };
 
+export type DiscoveryFeedbackQueryInput = {
+  page?: unknown;
+  pageSize?: unknown;
+};
+
 export type DiscoveryEventCard = {
   id: string;
   title: string;
@@ -115,6 +120,29 @@ export type DiscoveryFeedbackSummary = {
   }>;
 };
 
+export type DiscoveryFeedbackEntry = {
+  id: string;
+  userId: string;
+  userName: string;
+  userImageUrl: string | null;
+  rating: number;
+  reviewText: string | null;
+  createdAt: string;
+};
+
+export type DiscoveryEventFeedbackState = {
+  feedbackSummary: DiscoveryFeedbackSummary;
+  feedbackEligibility: DiscoveryFeedbackEligibility;
+  entries: DiscoveryFeedbackEntry[];
+  entryPagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  viewerFeedback: DiscoveryFeedbackEntry | null;
+};
+
 export type EventReputationSnapshot = {
   eventId: string;
   eventReputationScore: number;
@@ -163,5 +191,13 @@ export type DiscoverableEventDetail = {
   availability: DiscoveryAvailabilitySnapshot;
   feedbackSummary: DiscoveryFeedbackSummary;
   feedbackEligibility: DiscoveryFeedbackEligibility;
+  feedbackEntries: DiscoveryFeedbackEntry[];
+  feedbackEntryPagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  viewerFeedback: DiscoveryFeedbackEntry | null;
   reputation: EventReputationSnapshot;
 };

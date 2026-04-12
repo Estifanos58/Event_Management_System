@@ -4,6 +4,7 @@ import { toErrorResponse } from "@/domains/identity/guards";
 export type DiscoveryDomainErrorCode =
   | "BAD_REQUEST"
   | "EVENT_NOT_FOUND"
+  | "FEEDBACK_NOT_FOUND"
   | "NOT_ELIGIBLE"
   | "RATE_LIMITED"
   | "SPAM_DETECTED"

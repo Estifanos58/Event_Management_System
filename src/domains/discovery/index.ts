@@ -12,6 +12,7 @@ export {
   getDiscoveryRecommendations,
   getEventFeedbackStatus,
   submitEventFeedback,
+  deleteMyEventFeedback,
 } from "@/domains/discovery/service";
 
 export {
@@ -33,6 +34,8 @@ export type {
   DiscoveryRecommendation,
   DiscoveryRecommendationResult,
   DiscoveryFeedbackEligibility,
+  DiscoveryFeedbackEntry,
+  DiscoveryEventFeedbackState,
   DiscoveryFeedbackSummary,
   EventReputationSnapshot,
   DiscoverableEventDetail,
