@@ -1,5 +1,8 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
+
+const PAGE_SIZE = 20;
 
 type OrganizationRow = {
   id: string;
@@ -17,12 +20,42 @@ type OrganizationRow = {
   };
 };
 
-export default async function AdminOrganizationsPage() {
+type AdminOrganizationsPageProps = {
+  searchParams: Promise<{
+    page?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(page: number) {
+  return `/admin/organizations?page=${page}`;
+}
+
+export default async function AdminOrganizationsPage({ searchParams }: AdminOrganizationsPageProps) {
+  const params = await searchParams;
+  const requestedPage = parsePage(params.page);
+  const totalOrganizations = await prisma.organization.count();
+  const totalPages = Math.max(1, Math.ceil(totalOrganizations / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+
   const organizations = (await prisma.organization.findMany({
     orderBy: {
       createdAt: "desc",
     },
-    take: 200,
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
     select: {
       id: true,
       legalName: true,
@@ -49,6 +82,9 @@ export default async function AdminOrganizationsPage() {
         <CardDescription>
           Verification state, regional footprint, and operational activity by organization.
         </CardDescription>
+        <p className="text-xs text-gray-500">
+          Page {page} of {totalPages} · {totalOrganizations} organizations
+        </p>
       </CardHeader>
       <CardContent>
         {organizations.length === 0 ? (
@@ -91,6 +127,12 @@ export default async function AdminOrganizationsPage() {
             </table>
           </div>
         )}
+
+        <PaginationControls
+          summary={`Showing ${organizations.length} organizations on this page`}
+          previousHref={createPageHref(Math.max(1, page - 1))}
+          nextHref={createPageHref(Math.min(totalPages, page + 1))}
+        />
       </CardContent>
     </Card>
   );

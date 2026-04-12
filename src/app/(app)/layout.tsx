@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { ScopeType } from "@prisma/client";
+import { BanStatusBanner } from "@/components/layout/ban-status-banner";
 import { signOutAction } from "@/domains/identity/actions";
+import { listActiveBansForUser } from "@/domains/moderation/service";
 import {
   LayoutDashboard,
   Compass,
@@ -22,6 +24,7 @@ import {
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const snapshot = await requireDashboardSnapshot();
+  const activeBans = await listActiveBansForUser(snapshot.session.user.id);
 
   const organizationContext = snapshot.contexts.find(
     (context) => context.type === ScopeType.ORGANIZATION,
@@ -172,7 +175,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         </header>
 
         <main className="flex-1 overflow-y-auto px-6 py-8" id="main-content">
-          <div className="mx-auto w-full max-w-6xl">{children}</div>
+          <div className="mx-auto w-full max-w-6xl space-y-4">
+            <BanStatusBanner bans={activeBans} />
+            {children}
+          </div>
         </main>
       </div>
     </div>

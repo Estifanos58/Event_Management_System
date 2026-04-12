@@ -1,12 +1,16 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { Select } from "@/components/ui/select";
 import { prisma } from "@/core/db/prisma";
+
+const PAGE_SIZE = 40;
 
 type AdminAuditPageProps = {
   searchParams: Promise<{
     q?: string;
     action?: string;
+    page?: string;
   }>;
 };
 
@@ -26,49 +30,79 @@ type AuditRow = {
   } | null;
 };
 
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(input: { page: number; q: string; actionFilter: string }) {
+  const qSegment = input.q.length > 0 ? `&q=${encodeURIComponent(input.q)}` : "";
+  const actionSegment =
+    input.actionFilter !== "ALL" ? `&action=${encodeURIComponent(input.actionFilter)}` : "";
+  return `/admin/audit?page=${input.page}${qSegment}${actionSegment}`;
+}
+
 export default async function AdminAuditPage({ searchParams }: AdminAuditPageProps) {
   const params = await searchParams;
   const q = params.q?.trim() ?? "";
   const actionFilter = params.action?.trim() ?? "ALL";
+  const requestedPage = parsePage(params.page);
+
+  const whereClause = {
+    ...(actionFilter !== "ALL" ? { action: actionFilter } : {}),
+    ...(q.length > 0
+      ? {
+          OR: [
+            {
+              action: {
+                contains: q,
+                mode: "insensitive" as const,
+              },
+            },
+            {
+              scopeId: {
+                contains: q,
+                mode: "insensitive" as const,
+              },
+            },
+            {
+              targetType: {
+                contains: q,
+                mode: "insensitive" as const,
+              },
+            },
+            {
+              targetId: {
+                contains: q,
+                mode: "insensitive" as const,
+              },
+            },
+          ],
+        }
+      : {}),
+  };
+
+  const totalRecords = await prisma.auditEvent.count({
+    where: whereClause,
+  });
+  const totalPages = Math.max(1, Math.ceil(totalRecords / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
 
   const records = (await prisma.auditEvent.findMany({
-    where: {
-      ...(actionFilter !== "ALL" ? { action: actionFilter } : {}),
-      ...(q.length > 0
-        ? {
-            OR: [
-              {
-                action: {
-                  contains: q,
-                  mode: "insensitive",
-                },
-              },
-              {
-                scopeId: {
-                  contains: q,
-                  mode: "insensitive",
-                },
-              },
-              {
-                targetType: {
-                  contains: q,
-                  mode: "insensitive",
-                },
-              },
-              {
-                targetId: {
-                  contains: q,
-                  mode: "insensitive",
-                },
-              },
-            ],
-          }
-        : {}),
-    },
+    where: whereClause,
     orderBy: {
       createdAt: "desc",
     },
-    take: 250,
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
     select: {
       id: true,
       actorType: true,
@@ -114,6 +148,7 @@ export default async function AdminAuditPage({ searchParams }: AdminAuditPagePro
         </CardHeader>
         <CardContent>
           <form method="get" className="grid gap-3 lg:grid-cols-[1fr_260px_auto]">
+            <input type="hidden" name="page" value="1" />
             <label className="text-sm font-medium text-gray-900">
               Search action, scope, or target
               <Input className="mt-1" name="q" defaultValue={q} placeholder="Search audit events" />
@@ -144,8 +179,10 @@ export default async function AdminAuditPage({ searchParams }: AdminAuditPagePro
 
       <Card>
         <CardHeader>
-          <CardTitle>Entries ({records.length})</CardTitle>
-          <CardDescription>Showing up to 250 most recent matching audit entries.</CardDescription>
+          <CardTitle>Entries ({totalRecords})</CardTitle>
+          <CardDescription>
+            Page {page} of {totalPages}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {records.length === 0 ? (
@@ -186,6 +223,20 @@ export default async function AdminAuditPage({ searchParams }: AdminAuditPagePro
               </table>
             </div>
           )}
+
+          <PaginationControls
+            summary={`Showing ${records.length} records on this page`}
+            previousHref={createPageHref({
+              page: Math.max(1, page - 1),
+              q,
+              actionFilter,
+            })}
+            nextHref={createPageHref({
+              page: Math.min(totalPages, page + 1),
+              q,
+              actionFilter,
+            })}
+          />
         </CardContent>
       </Card>
     </div>

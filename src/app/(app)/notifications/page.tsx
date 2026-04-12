@@ -144,10 +144,28 @@ export default async function NotificationsPage({ searchParams }: NotificationsP
                           {notification.subject ?? notification.type}
                         </p>
                         <p className="mt-1 text-sm text-gray-500">{notification.content}</p>
+
+                        {notification.failureReason ? (
+                          <p className="mt-2 text-xs font-medium text-red-600">
+                            Failure reason: {notification.failureReason}
+                          </p>
+                        ) : null}
                       </div>
                       <div className="text-right text-xs text-gray-500">
+                        <p>
+                          Attempts: {notification.attemptCount} / {notification.maxAttempts}
+                        </p>
+                        <p className="mt-1">
+                          Recipient: {notification.recipientAddress ?? "n/a"}
+                        </p>
                         <p>Scheduled: {toDateTime(notification.scheduledFor)}</p>
                         <p className="mt-1">Created: {toDateTime(notification.createdAt)}</p>
+                        {notification.sentAt ? (
+                          <p className="mt-1">Sent: {toDateTime(notification.sentAt)}</p>
+                        ) : null}
+                        {notification.failedAt ? (
+                          <p className="mt-1">Failed: {toDateTime(notification.failedAt)}</p>
+                        ) : null}
                       </div>
                     </div>
                   </CardContent>

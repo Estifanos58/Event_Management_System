@@ -34,6 +34,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         <Link href="/admin/moderation" className={navLinkClass}>
           Moderation
         </Link>
+        <Link href="/admin/reappeals" className={navLinkClass}>
+          Reappeals
+        </Link>
         <Link href="/admin/reports" className={navLinkClass}>
           Reports
         </Link>

@@ -1,7 +1,10 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
 import { getMyOrderPaymentStatus } from "@/domains/ticketing/service";
 import { requireDashboardSnapshot } from "../../_lib/access";
+
+const PAGE_SIZE = 20;
 
 type AttendeeOrder = {
   id: string;
@@ -35,7 +38,30 @@ const PENDING_CHAPA_STATUSES = new Set([
   "AUTHORIZED",
 ]);
 
-async function loadAttendeeOrders(userId: string) {
+type AttendeeOrdersPageProps = {
+  searchParams: Promise<{
+    page?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(page: number) {
+  return `/attendee/orders?page=${page}`;
+}
+
+async function loadAttendeeOrders(userId: string, page: number, pageSize: number) {
   return (await prisma.order.findMany({
     where: {
       buyerUserId: userId,
@@ -73,7 +99,8 @@ async function loadAttendeeOrders(userId: string) {
     orderBy: {
       createdAt: "desc",
     },
-    take: 80,
+    skip: (page - 1) * pageSize,
+    take: pageSize,
   })) as AttendeeOrder[];
 }
 
@@ -85,11 +112,20 @@ function formatMoney(amount: number, currency: string) {
   }).format(amount);
 }
 
-export default async function AttendeeOrdersPage() {
+export default async function AttendeeOrdersPage({ searchParams }: AttendeeOrdersPageProps) {
+  const params = await searchParams;
+  const requestedPage = parsePage(params.page);
   const snapshot = await requireDashboardSnapshot();
   const userId = snapshot.session.user.id;
+  const totalOrders = await prisma.order.count({
+    where: {
+      buyerUserId: userId,
+    },
+  });
+  const totalPages = Math.max(1, Math.ceil(totalOrders / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
 
-  let orders = await loadAttendeeOrders(userId);
+  let orders = await loadAttendeeOrders(userId, page, PAGE_SIZE);
 
   const ordersNeedingSync = orders.filter((order) => {
     const latestAttempt = order.paymentAttempts[0];
@@ -115,7 +151,7 @@ export default async function AttendeeOrdersPage() {
       ),
     );
 
-    orders = await loadAttendeeOrders(userId);
+    orders = await loadAttendeeOrders(userId, page, PAGE_SIZE);
   }
 
   return (
@@ -131,69 +167,77 @@ export default async function AttendeeOrdersPage() {
           {orders.length === 0 ? (
             <p className="text-sm text-gray-500">No orders found for this account.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-full border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 text-left text-xs uppercase tracking-[0.12em] text-gray-500">
-                    <th className="py-2 pr-4">Order</th>
-                    <th className="py-2 pr-4">Event</th>
-                    <th className="py-2 pr-4">Total</th>
-                    <th className="py-2 pr-4">Payment</th>
-                    <th className="py-2">Tickets</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {orders.map((order) => {
-                    const latestPaymentAttempt = order.paymentAttempts[0];
+            <div className="space-y-4">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-left text-xs uppercase tracking-[0.12em] text-gray-500">
+                      <th className="py-2 pr-4">Order</th>
+                      <th className="py-2 pr-4">Event</th>
+                      <th className="py-2 pr-4">Total</th>
+                      <th className="py-2 pr-4">Payment</th>
+                      <th className="py-2">Tickets</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orders.map((order) => {
+                      const latestPaymentAttempt = order.paymentAttempts[0];
 
-                    return (
-                      <tr key={order.id} className="border-b border-gray-200/60 align-top">
-                        <td className="py-3 pr-4 text-gray-500">
-                          <p className="font-medium text-gray-900">{order.id}</p>
-                          <p className="mt-1 text-xs">{order.status}</p>
-                          <p className="mt-1 text-xs">Created {order.createdAt.toLocaleString()}</p>
-                        </td>
-                        <td className="py-3 pr-4 text-gray-500">
-                          <p className="font-medium text-gray-900">{order.event.title}</p>
-                          <p className="mt-1 text-xs">
-                            {order.event.startAt.toLocaleString()} - {order.event.timezone}
-                          </p>
-                        </td>
-                        <td className="py-3 pr-4 text-gray-500">
-                          {formatMoney(Number(order.totalAmount.toString()), order.currency)}
-                        </td>
-                        <td className="py-3 pr-4 text-gray-500">
-                          {latestPaymentAttempt ? (
-                            <>
-                              <p>
-                                {latestPaymentAttempt.provider} - {latestPaymentAttempt.status}
-                              </p>
-                              <p className="mt-1 text-xs">
-                                Updated {latestPaymentAttempt.updatedAt.toLocaleString()}
-                              </p>
-                            </>
-                          ) : (
-                            <p>No payment attempt</p>
-                          )}
-                        </td>
-                        <td className="py-3 text-gray-500">
-                          {order.tickets.length === 0 ? (
-                            <p>No tickets issued</p>
-                          ) : (
-                            <ul className="space-y-1 text-xs">
-                              {order.tickets.map((ticket) => (
-                                <li key={ticket.id}>
-                                  {ticket.id} - {ticket.status}
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                      return (
+                        <tr key={order.id} className="border-b border-gray-200/60 align-top">
+                          <td className="py-3 pr-4 text-gray-500">
+                            <p className="font-medium text-gray-900">{order.id}</p>
+                            <p className="mt-1 text-xs">{order.status}</p>
+                            <p className="mt-1 text-xs">Created {order.createdAt.toLocaleString()}</p>
+                          </td>
+                          <td className="py-3 pr-4 text-gray-500">
+                            <p className="font-medium text-gray-900">{order.event.title}</p>
+                            <p className="mt-1 text-xs">
+                              {order.event.startAt.toLocaleString()} - {order.event.timezone}
+                            </p>
+                          </td>
+                          <td className="py-3 pr-4 text-gray-500">
+                            {formatMoney(Number(order.totalAmount.toString()), order.currency)}
+                          </td>
+                          <td className="py-3 pr-4 text-gray-500">
+                            {latestPaymentAttempt ? (
+                              <>
+                                <p>
+                                  {latestPaymentAttempt.provider} - {latestPaymentAttempt.status}
+                                </p>
+                                <p className="mt-1 text-xs">
+                                  Updated {latestPaymentAttempt.updatedAt.toLocaleString()}
+                                </p>
+                              </>
+                            ) : (
+                              <p>No payment attempt</p>
+                            )}
+                          </td>
+                          <td className="py-3 text-gray-500">
+                            {order.tickets.length === 0 ? (
+                              <p>No tickets issued</p>
+                            ) : (
+                              <ul className="space-y-1 text-xs">
+                                {order.tickets.map((ticket) => (
+                                  <li key={ticket.id}>
+                                    {ticket.id} - {ticket.status}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <PaginationControls
+                summary={`Page ${page} of ${totalPages} - ${totalOrders} orders`}
+                previousHref={createPageHref(Math.max(1, page - 1))}
+                nextHref={createPageHref(Math.min(totalPages, page + 1))}
+              />
             </div>
           )}
         </CardContent>

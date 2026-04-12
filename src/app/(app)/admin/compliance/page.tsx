@@ -1,5 +1,10 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
+
+const DELETION_PAGE_SIZE = 20;
+const ACCEPTANCE_PAGE_SIZE = 20;
+const EXPORT_PAGE_SIZE = 20;
 
 type DeletionRequestRow = {
   id: string;
@@ -45,8 +50,42 @@ type ExportJobRow = {
   } | null;
 };
 
-export default async function AdminCompliancePage() {
-  const [deletionByStatus, exportByStatus, deletions, acceptances, exports] = await Promise.all([
+type AdminCompliancePageProps = {
+  searchParams: Promise<{
+    deletionPage?: string;
+    acceptancePage?: string;
+    exportPage?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(input: {
+  deletionPage: number;
+  acceptancePage: number;
+  exportPage: number;
+}) {
+  return `/admin/compliance?deletionPage=${input.deletionPage}&acceptancePage=${input.acceptancePage}&exportPage=${input.exportPage}`;
+}
+
+export default async function AdminCompliancePage({ searchParams }: AdminCompliancePageProps) {
+  const params = await searchParams;
+  const requestedDeletionPage = parsePage(params.deletionPage);
+  const requestedAcceptancePage = parsePage(params.acceptancePage);
+  const requestedExportPage = parsePage(params.exportPage);
+
+  const [deletionByStatus, exportByStatus, deletionTotal, acceptanceTotal, exportTotal] = await Promise.all([
     prisma.dataDeletionRequest.groupBy({
       by: ["status"],
       _count: {
@@ -59,11 +98,26 @@ export default async function AdminCompliancePage() {
         _all: true,
       },
     }),
+    prisma.dataDeletionRequest.count(),
+    prisma.policyAcceptance.count(),
+    prisma.dataExportJob.count(),
+  ]);
+
+  const deletionTotalPages = Math.max(1, Math.ceil(deletionTotal / DELETION_PAGE_SIZE));
+  const acceptanceTotalPages = Math.max(1, Math.ceil(acceptanceTotal / ACCEPTANCE_PAGE_SIZE));
+  const exportTotalPages = Math.max(1, Math.ceil(exportTotal / EXPORT_PAGE_SIZE));
+
+  const deletionPage = Math.min(requestedDeletionPage, deletionTotalPages);
+  const acceptancePage = Math.min(requestedAcceptancePage, acceptanceTotalPages);
+  const exportPage = Math.min(requestedExportPage, exportTotalPages);
+
+  const [deletions, acceptances, exports] = await Promise.all([
     prisma.dataDeletionRequest.findMany({
       orderBy: {
         requestedAt: "desc",
       },
-      take: 120,
+      skip: (deletionPage - 1) * DELETION_PAGE_SIZE,
+      take: DELETION_PAGE_SIZE,
       select: {
         id: true,
         status: true,
@@ -82,7 +136,8 @@ export default async function AdminCompliancePage() {
       orderBy: {
         acceptedAt: "desc",
       },
-      take: 120,
+      skip: (acceptancePage - 1) * ACCEPTANCE_PAGE_SIZE,
+      take: ACCEPTANCE_PAGE_SIZE,
       select: {
         id: true,
         documentType: true,
@@ -102,7 +157,8 @@ export default async function AdminCompliancePage() {
       orderBy: {
         createdAt: "desc",
       },
-      take: 120,
+      skip: (exportPage - 1) * EXPORT_PAGE_SIZE,
+      take: EXPORT_PAGE_SIZE,
       select: {
         id: true,
         type: true,
@@ -166,6 +222,9 @@ export default async function AdminCompliancePage() {
           <CardHeader>
             <CardTitle>Deletion Requests</CardTitle>
             <CardDescription>Recent user deletion requests and processing state.</CardDescription>
+            <p className="text-xs text-gray-500">
+              Page {deletionPage} of {deletionTotalPages} · {deletionTotal} requests
+            </p>
           </CardHeader>
           <CardContent className="space-y-2">
             {deletionByStatus.map((status) => (
@@ -186,6 +245,20 @@ export default async function AdminCompliancePage() {
                 </article>
               ))}
             </div>
+
+            <PaginationControls
+              summary={`Showing ${deletions.length} deletion requests on this page`}
+              previousHref={createPageHref({
+                deletionPage: Math.max(1, deletionPage - 1),
+                acceptancePage,
+                exportPage,
+              })}
+              nextHref={createPageHref({
+                deletionPage: Math.min(deletionTotalPages, deletionPage + 1),
+                acceptancePage,
+                exportPage,
+              })}
+            />
           </CardContent>
         </Card>
 
@@ -193,6 +266,9 @@ export default async function AdminCompliancePage() {
           <CardHeader>
             <CardTitle>Policy Acceptances</CardTitle>
             <CardDescription>Document/version acceptance evidence trail.</CardDescription>
+            <p className="text-xs text-gray-500">
+              Page {acceptancePage} of {acceptanceTotalPages} · {acceptanceTotal} acceptances
+            </p>
           </CardHeader>
           <CardContent>
             <div className="max-h-130 space-y-2 overflow-y-auto pr-1">
@@ -211,6 +287,20 @@ export default async function AdminCompliancePage() {
                 </article>
               ))}
             </div>
+
+            <PaginationControls
+              summary={`Showing ${acceptances.length} policy acceptances on this page`}
+              previousHref={createPageHref({
+                deletionPage,
+                acceptancePage: Math.max(1, acceptancePage - 1),
+                exportPage,
+              })}
+              nextHref={createPageHref({
+                deletionPage,
+                acceptancePage: Math.min(acceptanceTotalPages, acceptancePage + 1),
+                exportPage,
+              })}
+            />
           </CardContent>
         </Card>
 
@@ -218,6 +308,9 @@ export default async function AdminCompliancePage() {
           <CardHeader>
             <CardTitle>Data Export Jobs</CardTitle>
             <CardDescription>Export request lifecycle by status and context.</CardDescription>
+            <p className="text-xs text-gray-500">
+              Page {exportPage} of {exportTotalPages} · {exportTotal} export jobs
+            </p>
           </CardHeader>
           <CardContent className="space-y-2">
             {exportByStatus.map((status) => (
@@ -245,6 +338,20 @@ export default async function AdminCompliancePage() {
                 </article>
               ))}
             </div>
+
+            <PaginationControls
+              summary={`Showing ${exports.length} export jobs on this page`}
+              previousHref={createPageHref({
+                deletionPage,
+                acceptancePage,
+                exportPage: Math.max(1, exportPage - 1),
+              })}
+              nextHref={createPageHref({
+                deletionPage,
+                acceptancePage,
+                exportPage: Math.min(exportTotalPages, exportPage + 1),
+              })}
+            />
           </CardContent>
         </Card>
       </div>

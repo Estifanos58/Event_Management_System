@@ -1,49 +1,77 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ModerationQueuePanel } from "@/components/admin/moderation/moderation-queue-panel";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
 
-type AbuseReportRow = {
-  id: string;
-  targetType: string;
-  targetId: string;
-  category: string;
-  status: string;
-  createdAt: Date;
-  reporter: {
-    name: string;
-    email: string;
-  };
-  event: {
-    title: string;
-  } | null;
+const PAGE_SIZE = 10;
+
+type PageProps = {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
 
-type RiskCaseRow = {
-  id: string;
-  scopeType: string;
-  scopeId: string;
-  source: string;
-  severity: string;
-  status: string;
-  createdAt: Date;
-  event: {
-    title: string;
-  } | null;
-};
+function parsePage(value: string | string[] | undefined) {
+  if (typeof value !== "string") {
+    return 1;
+  }
 
-export default async function AdminModerationPage() {
-  const [abuseReports, riskCases, openAbuseCount, openRiskCount] = await Promise.all([
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function toEvidenceUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function createPageHref(input: {
+  reportPage: number;
+  riskPage: number;
+}) {
+  return `/admin/moderation?reportPage=${input.reportPage}&riskPage=${input.riskPage}`;
+}
+
+export default async function AdminModerationPage({ searchParams }: PageProps) {
+  const params = await searchParams;
+  const reportPage = parsePage(params.reportPage);
+  const riskPage = parsePage(params.riskPage);
+
+  const reportSkip = (reportPage - 1) * PAGE_SIZE;
+  const riskSkip = (riskPage - 1) * PAGE_SIZE;
+
+  const [
+    abuseReports,
+    riskCases,
+    openAbuseCount,
+    openRiskCount,
+    totalAbuseReports,
+    totalRiskCases,
+  ] = await Promise.all([
     prisma.abuseReport.findMany({
       orderBy: {
         createdAt: "desc",
       },
-      take: 120,
+      skip: reportSkip,
+      take: PAGE_SIZE,
       select: {
         id: true,
         targetType: true,
         targetId: true,
         category: true,
         status: true,
+        description: true,
+        evidenceUrls: true,
         createdAt: true,
+        organizationId: true,
         reporter: {
           select: {
             name: true,
@@ -56,12 +84,13 @@ export default async function AdminModerationPage() {
           },
         },
       },
-    }) as Promise<AbuseReportRow[]>,
+    }),
     prisma.riskCase.findMany({
       orderBy: {
         createdAt: "desc",
       },
-      take: 120,
+      skip: riskSkip,
+      take: PAGE_SIZE,
       select: {
         id: true,
         scopeType: true,
@@ -76,7 +105,7 @@ export default async function AdminModerationPage() {
           },
         },
       },
-    }) as Promise<RiskCaseRow[]>,
+    }),
     prisma.abuseReport.count({
       where: {
         status: {
@@ -91,7 +120,37 @@ export default async function AdminModerationPage() {
         },
       },
     }),
+    prisma.abuseReport.count(),
+    prisma.riskCase.count(),
   ]);
+
+  const totalReportPages = Math.max(1, Math.ceil(totalAbuseReports / PAGE_SIZE));
+  const totalRiskPages = Math.max(1, Math.ceil(totalRiskCases / PAGE_SIZE));
+
+  const reportItems = abuseReports.map((report) => ({
+    id: report.id,
+    targetType: report.targetType,
+    targetId: report.targetId,
+    category: report.category,
+    status: report.status,
+    description: report.description,
+    evidenceUrls: toEvidenceUrls(report.evidenceUrls),
+    createdAt: report.createdAt.toISOString(),
+    organizationId: report.organizationId,
+    reporter: report.reporter,
+    event: report.event,
+  }));
+
+  const riskItems = riskCases.map((riskCase) => ({
+    id: riskCase.id,
+    scopeType: riskCase.scopeType,
+    scopeId: riskCase.scopeId,
+    source: riskCase.source,
+    severity: riskCase.severity,
+    status: riskCase.status,
+    createdAt: riskCase.createdAt.toISOString(),
+    event: riskCase.event,
+  }));
 
   return (
     <div className="space-y-6">
@@ -114,71 +173,46 @@ export default async function AdminModerationPage() {
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Abuse Reports</CardTitle>
-            <CardDescription>Latest abuse submissions across platform targets.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {abuseReports.length === 0 ? (
-              <p className="text-sm text-gray-500">No abuse reports found.</p>
-            ) : (
-              <div className="max-h-135 space-y-2 overflow-y-auto pr-1">
-                {abuseReports.map((report) => (
-                  <article
-                    key={report.id}
-                    className="rounded-lg border border-gray-200 bg-gray-50 p-3"
-                  >
-                    <p className="text-sm font-medium text-gray-900">{report.category}</p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      {report.status} · {report.targetType}:{report.targetId}
-                    </p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Reporter: {report.reporter.name || report.reporter.email}
-                    </p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Event: {report.event?.title ?? "n/a"} · {report.createdAt.toLocaleString()}
-                    </p>
-                  </article>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+      <ModerationQueuePanel abuseReports={reportItems} riskCases={riskItems} />
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Risk Cases</CardTitle>
-            <CardDescription>
-              Active and historical risk cases with severity indicators.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {riskCases.length === 0 ? (
-              <p className="text-sm text-gray-500">No risk cases found.</p>
-            ) : (
-              <div className="max-h-135 space-y-2 overflow-y-auto pr-1">
-                {riskCases.map((riskCase) => (
-                  <article
-                    key={riskCase.id}
-                    className="rounded-lg border border-gray-200 bg-gray-50 p-3"
-                  >
-                    <p className="text-sm font-medium text-gray-900">
-                      {riskCase.source} · {riskCase.severity}
-                    </p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      {riskCase.status} · {riskCase.scopeType}:{riskCase.scopeId}
-                    </p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Event: {riskCase.event?.title ?? "n/a"} · {riskCase.createdAt.toLocaleString()}
-                    </p>
-                  </article>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <p className="text-sm font-semibold text-gray-900">Abuse report pages</p>
+          <p className="mt-1 text-xs text-gray-500">
+            Page {reportPage} of {totalReportPages}
+          </p>
+          <PaginationControls
+            className="mt-3 justify-start"
+            linkClassName="h-9"
+            previousHref={createPageHref({
+              reportPage: Math.max(1, reportPage - 1),
+              riskPage,
+            })}
+            nextHref={createPageHref({
+              reportPage: Math.min(totalReportPages, reportPage + 1),
+              riskPage,
+            })}
+          />
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <p className="text-sm font-semibold text-gray-900">Risk case pages</p>
+          <p className="mt-1 text-xs text-gray-500">
+            Page {riskPage} of {totalRiskPages}
+          </p>
+          <PaginationControls
+            className="mt-3 justify-start"
+            linkClassName="h-9"
+            previousHref={createPageHref({
+              reportPage,
+              riskPage: Math.max(1, riskPage - 1),
+            })}
+            nextHref={createPageHref({
+              reportPage,
+              riskPage: Math.min(totalRiskPages, riskPage + 1),
+            })}
+          />
+        </div>
       </div>
     </div>
   );

@@ -1,16 +1,48 @@
 import Link from "next/link";
+import { ScopeType } from "@prisma/client";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { Select } from "@/components/ui/select";
+import { prisma } from "@/core/db/prisma";
 import { getEventsOverviewSnapshot } from "@/domains/events/service";
+
+const PAGE_SIZE = 20;
 
 type OrganizerEventsPageProps = {
   searchParams: Promise<{
     q?: string;
     status?: string;
     sales?: string;
+    page?: string;
   }>;
 };
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(input: {
+  page: number;
+  q: string;
+  status: string;
+  sales: string;
+}) {
+  const qSegment = input.q.length > 0 ? `&q=${encodeURIComponent(input.q)}` : "";
+  const statusSegment = input.status !== "ALL" ? `&status=${encodeURIComponent(input.status)}` : "";
+  const salesSegment = input.sales !== "ALL" ? `&sales=${encodeURIComponent(input.sales)}` : "";
+
+  return `/organizer/events?page=${input.page}${qSegment}${statusSegment}${salesSegment}`;
+}
 
 export default async function OrganizerEventsPage({ searchParams }: OrganizerEventsPageProps) {
   const params = await searchParams;
@@ -29,6 +61,7 @@ export default async function OrganizerEventsPage({ searchParams }: OrganizerEve
   const q = params.q?.trim().toLowerCase() || "";
   const status = params.status?.trim() || "ALL";
   const sales = params.sales?.trim() || "ALL";
+  const requestedPage = parsePage(params.page);
 
   const statusOptions = [
     "ALL",
@@ -43,29 +76,84 @@ export default async function OrganizerEventsPage({ searchParams }: OrganizerEve
     "POSTPONED",
   ];
 
-  const filteredEvents = overview.events.filter((event) => {
-    if (q) {
-      const inTitle = event.title.toLowerCase().includes(q);
-      const inSlug = (event.slug ?? "").toLowerCase().includes(q);
-      if (!inTitle && !inSlug) {
-        return false;
-      }
-    }
+  let contextWhereClause: Record<string, unknown> = {};
 
-    if (status !== "ALL" && event.status !== status) {
-      return false;
-    }
+  if (overview.activeContext.type === ScopeType.ORGANIZATION) {
+    contextWhereClause = {
+      orgId: overview.activeContext.id,
+    };
+  } else if (overview.activeContext.type === ScopeType.EVENT) {
+    contextWhereClause = {
+      id: overview.activeContext.id,
+    };
+  } else if (overview.activeContext.type === ScopeType.PERSONAL) {
+    contextWhereClause = {
+      createdBy: overview.session.user.id,
+    };
+  }
 
-    if (sales === "PAUSED" && !event.ticketSalesPaused) {
-      return false;
-    }
+  const whereClause = {
+    ...contextWhereClause,
+    ...(status !== "ALL" ? { status: status as never } : {}),
+    ...(sales === "PAUSED"
+      ? { ticketSalesPaused: true }
+      : sales === "ACTIVE"
+        ? { ticketSalesPaused: false }
+        : {}),
+    ...(q
+      ? {
+          OR: [
+            {
+              title: {
+                contains: q,
+                mode: "insensitive" as const,
+              },
+            },
+            {
+              slug: {
+                contains: q,
+                mode: "insensitive" as const,
+              },
+            },
+          ],
+        }
+      : {}),
+  };
 
-    if (sales === "ACTIVE" && event.ticketSalesPaused) {
-      return false;
-    }
+  const totalEvents = overview.canReadEvents
+    ? await prisma.event.count({
+        where: whereClause,
+      })
+    : 0;
 
-    return true;
-  });
+  const totalPages = Math.max(1, Math.ceil(totalEvents / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+
+  const filteredEvents = overview.canReadEvents
+    ? await prisma.event.findMany({
+        where: whereClause,
+        orderBy: {
+          startAt: "asc",
+        },
+        skip: (page - 1) * PAGE_SIZE,
+        take: PAGE_SIZE,
+        select: {
+          id: true,
+          title: true,
+          slug: true,
+          visibility: true,
+          venueMode: true,
+          registrationType: true,
+          status: true,
+          ticketSalesPaused: true,
+          startAt: true,
+          endAt: true,
+          timezone: true,
+          totalCapacity: true,
+          waitlistEnabled: true,
+        },
+      })
+    : [];
 
   return (
     <div className="space-y-6">
@@ -78,6 +166,7 @@ export default async function OrganizerEventsPage({ searchParams }: OrganizerEve
         </CardHeader>
         <CardContent>
           <form className="grid gap-3 lg:grid-cols-[1fr_220px_180px_auto]" method="get">
+            <input type="hidden" name="page" value="1" />
             <label className="text-sm font-medium text-gray-900">
               Search title or slug
               <Input className="mt-1" name="q" defaultValue={params.q ?? ""} placeholder="Search events" />
@@ -122,9 +211,9 @@ export default async function OrganizerEventsPage({ searchParams }: OrganizerEve
 
       <Card>
         <CardHeader>
-          <CardTitle>Portfolio ({filteredEvents.length})</CardTitle>
+          <CardTitle>Portfolio ({totalEvents})</CardTitle>
           <CardDescription>
-            Active context: {overview.activeContext.type} / {overview.activeContext.id}
+            Active context: {overview.activeContext.type} / {overview.activeContext.id} · Page {page} of {totalPages}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -188,6 +277,24 @@ export default async function OrganizerEventsPage({ searchParams }: OrganizerEve
               </table>
             </div>
           )}
+
+          {overview.canReadEvents ? (
+            <PaginationControls
+              summary={`Showing ${filteredEvents.length} events on this page`}
+              previousHref={createPageHref({
+                page: Math.max(1, page - 1),
+                q,
+                status,
+                sales,
+              })}
+              nextHref={createPageHref({
+                page: Math.min(totalPages, page + 1),
+                q,
+                status,
+                sales,
+              })}
+            />
+          ) : null}
         </CardContent>
       </Card>
     </div>

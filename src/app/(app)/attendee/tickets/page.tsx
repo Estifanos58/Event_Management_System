@@ -2,10 +2,35 @@ import { TicketTransferStatus } from "@prisma/client";
 import Link from "next/link";
 import QRCode from "qrcode";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
 import { requireDashboardSnapshot } from "../../_lib/access";
 
 const INLINE_QR_PREVIEW_LIMIT = 12;
+const PAGE_SIZE = 12;
+
+type AttendeeTicketsPageProps = {
+  searchParams: Promise<{
+    page?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(page: number) {
+  return `/attendee/tickets?page=${page}`;
+}
 
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("en-US", {
@@ -15,14 +40,25 @@ function formatMoney(amount: number, currency: string) {
   }).format(amount);
 }
 
-export default async function AttendeeTicketsPage() {
+export default async function AttendeeTicketsPage({ searchParams }: AttendeeTicketsPageProps) {
+  const params = await searchParams;
+  const requestedPage = parsePage(params.page);
   const snapshot = await requireDashboardSnapshot();
   const userId = snapshot.session.user.id;
 
+  const ticketWhereClause = {
+    OR: [{ ownerId: userId }, { attendeeId: userId }],
+  };
+
+  const totalTickets = await prisma.ticket.count({
+    where: ticketWhereClause,
+  });
+
+  const totalPages = Math.max(1, Math.ceil(totalTickets / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+
   const tickets = await prisma.ticket.findMany({
-    where: {
-      OR: [{ ownerId: userId }, { attendeeId: userId }],
-    },
+    where: ticketWhereClause,
     include: {
       event: {
         select: {
@@ -60,7 +96,8 @@ export default async function AttendeeTicketsPage() {
     orderBy: {
       issuedAt: "desc",
     },
-    take: 120,
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
   });
 
   const qrPreviewByTicketId = new Map<string, string>();
@@ -102,77 +139,85 @@ export default async function AttendeeTicketsPage() {
             </CardContent>
           </Card>
         ) : (
-          <section className="grid gap-4 lg:grid-cols-2">
-            {tickets.map((ticket) => (
-              <Card key={ticket.id}>
-                <CardHeader>
-                  <CardTitle className="text-base">{ticket.event.title}</CardTitle>
-                  <CardDescription>{ticket.event.startAt.toLocaleString()}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3 text-sm text-gray-500">
-                  {qrPreviewByTicketId.get(ticket.id) ? (
-                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">QR Preview</p>
-                      <div className="mt-2 flex items-center justify-center rounded-lg border border-gray-200 bg-white p-2">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={qrPreviewByTicketId.get(ticket.id)}
-                          alt={`Ticket ${ticket.id} QR preview`}
-                          className="h-24 w-24"
-                        />
+          <div className="space-y-4">
+            <section className="grid gap-4 lg:grid-cols-2">
+              {tickets.map((ticket) => (
+                <Card key={ticket.id}>
+                  <CardHeader>
+                    <CardTitle className="text-base">{ticket.event.title}</CardTitle>
+                    <CardDescription>{ticket.event.startAt.toLocaleString()}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3 text-sm text-gray-500">
+                    {qrPreviewByTicketId.get(ticket.id) ? (
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">QR Preview</p>
+                        <div className="mt-2 flex items-center justify-center rounded-lg border border-gray-200 bg-white p-2">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={qrPreviewByTicketId.get(ticket.id)}
+                            alt={`Ticket ${ticket.id} QR preview`}
+                            className="h-24 w-24"
+                          />
+                        </div>
+                        <p className="mt-2 text-xs text-gray-500">Open ticket for full-size scan view.</p>
                       </div>
-                      <p className="mt-2 text-xs text-gray-500">Open ticket for full-size scan view.</p>
-                    </div>
-                  ) : (
-                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">QR Preview</p>
-                      <p className="mt-1 text-xs text-gray-500">Open ticket to view and present your QR code.</p>
-                    </div>
-                  )}
+                    ) : (
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">QR Preview</p>
+                        <p className="mt-1 text-xs text-gray-500">Open ticket to view and present your QR code.</p>
+                      </div>
+                    )}
 
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Ticket</p>
-                      <p className="mt-1 font-semibold text-gray-900">{ticket.id}</p>
-                      <p className="mt-1 text-xs">Status: {ticket.status}</p>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Ticket</p>
+                        <p className="mt-1 font-semibold text-gray-900">{ticket.id}</p>
+                        <p className="mt-1 text-xs">Status: {ticket.status}</p>
+                      </div>
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Class</p>
+                        <p className="mt-1 font-semibold text-gray-900">
+                          {ticket.ticketClass.name} ({ticket.ticketClass.type})
+                        </p>
+                      </div>
                     </div>
+
                     <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Class</p>
-                      <p className="mt-1 font-semibold text-gray-900">
-                        {ticket.ticketClass.name} ({ticket.ticketClass.type})
+                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Order</p>
+                      <p className="mt-1 text-gray-900">{ticket.order.id}</p>
+                      <p className="mt-1 text-xs">
+                        {ticket.order.status} / {formatMoney(Number(ticket.order.totalAmount.toString()), ticket.order.currency)}
                       </p>
                     </div>
-                  </div>
 
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Order</p>
-                    <p className="mt-1 text-gray-900">{ticket.order.id}</p>
-                    <p className="mt-1 text-xs">
-                      {ticket.order.status} / {formatMoney(Number(ticket.order.totalAmount.toString()), ticket.order.currency)}
-                    </p>
-                  </div>
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Transfer</p>
+                      <p className="mt-1">
+                        {ticket.transfers[0]
+                          ? `Pending until ${ticket.transfers[0].expiresAt.toLocaleString()}`
+                          : "No active transfer"}
+                      </p>
+                    </div>
 
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Transfer</p>
-                    <p className="mt-1">
-                      {ticket.transfers[0]
-                        ? `Pending until ${ticket.transfers[0].expiresAt.toLocaleString()}`
-                        : "No active transfer"}
-                    </p>
-                  </div>
+                    <div className="pt-1">
+                      <Link
+                        href={`/attendee/tickets/${ticket.id}`}
+                        className="inline-flex rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600"
+                      >
+                        Open ticket
+                      </Link>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </section>
 
-                  <div className="pt-1">
-                    <Link
-                      href={`/attendee/tickets/${ticket.id}`}
-                      className="inline-flex rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600"
-                    >
-                      Open ticket
-                    </Link>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </section>
+            <PaginationControls
+              summary={`Page ${page} of ${totalPages} - ${totalTickets} tickets`}
+              previousHref={createPageHref(Math.max(1, page - 1))}
+              nextHref={createPageHref(Math.min(totalPages, page + 1))}
+            />
+          </div>
         )}
       </main>
 

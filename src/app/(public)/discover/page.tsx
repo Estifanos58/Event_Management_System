@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Calendar, MapPin, ArrowRight, SlidersHorizontal } from "lucide-react";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -558,33 +559,16 @@ export default async function DiscoverPage({ searchParams }: DiscoverPageProps) 
 
           {result && result.total > result.pageSize ? (
             <div className="flex items-center justify-between rounded-2xl border border-gray-200 bg-white p-4">
-              <p className="text-sm text-gray-500">
-                Page {result.page} of {totalPages}
-              </p>
-              <div className="flex items-center gap-2">
-                <Link
-                  href={previousPageHref}
-                  aria-disabled={result.page <= 1}
-                  className={`inline-flex h-10 items-center rounded-xl border px-4 text-sm font-semibold transition-colors ${
-                    result.page <= 1
-                      ? "pointer-events-none cursor-not-allowed border-gray-100 text-gray-300"
-                      : "border-gray-200 text-gray-700 hover:bg-gray-50"
-                  }`}
-                >
-                  Previous
-                </Link>
-                <Link
-                  href={nextPageHref}
-                  aria-disabled={result.page >= totalPages}
-                  className={`inline-flex h-10 items-center rounded-xl border px-4 text-sm font-semibold transition-colors ${
-                    result.page >= totalPages
-                      ? "pointer-events-none cursor-not-allowed border-gray-100 text-gray-300"
-                      : "border-gray-200 text-gray-700 hover:bg-gray-50"
-                  }`}
-                >
-                  Next
-                </Link>
-              </div>
+              <PaginationControls
+                className="mt-0 w-full"
+                summaryClassName="text-sm text-gray-500"
+                linkClassName="h-10 rounded-xl px-4 font-semibold transition-colors"
+                previousHref={previousPageHref}
+                nextHref={nextPageHref}
+                disablePrevious={result.page <= 1}
+                disableNext={result.page >= totalPages}
+                summary={`Page ${result.page} of ${totalPages}`}
+              />
             </div>
           ) : null}
 

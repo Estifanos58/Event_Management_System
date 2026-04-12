@@ -1,7 +1,10 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
 import { env } from "@/core/env";
 import { collectOperationalMetricsSnapshot } from "@/core/ops/metrics-snapshot";
+
+const ALERT_HISTORY_PAGE_SIZE = 20;
 
 type AlertSignal = {
   code: string;
@@ -22,6 +25,29 @@ type AlertAuditRow = {
     runbookSection?: string;
   } | null;
 };
+
+type AdminAlertsPageProps = {
+  searchParams: Promise<{
+    page?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(page: number) {
+  return `/admin/alerts?page=${page}`;
+}
 
 function buildAlertSignals(snapshot: Awaited<ReturnType<typeof collectOperationalMetricsSnapshot>>) {
   const signals: AlertSignal[] = [
@@ -88,7 +114,18 @@ function buildAlertSignals(snapshot: Awaited<ReturnType<typeof collectOperationa
   return signals;
 }
 
-export default async function AdminAlertsPage() {
+export default async function AdminAlertsPage({ searchParams }: AdminAlertsPageProps) {
+  const params = await searchParams;
+  const requestedPage = parsePage(params.page);
+  const totalAlertEvents = await prisma.auditEvent.count({
+    where: {
+      action: "ops.alert.triggered",
+    },
+  });
+
+  const totalPages = Math.max(1, Math.ceil(totalAlertEvents / ALERT_HISTORY_PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+
   const [snapshot, recentAlertEvents] = await Promise.all([
     collectOperationalMetricsSnapshot(),
     prisma.auditEvent.findMany({
@@ -98,7 +135,8 @@ export default async function AdminAlertsPage() {
       orderBy: {
         createdAt: "desc",
       },
-      take: 80,
+      skip: (page - 1) * ALERT_HISTORY_PAGE_SIZE,
+      take: ALERT_HISTORY_PAGE_SIZE,
       select: {
         id: true,
         reason: true,
@@ -145,7 +183,7 @@ export default async function AdminAlertsPage() {
         <CardHeader>
           <CardTitle>Alert Emission History</CardTitle>
           <CardDescription>
-            Recent emitted alert audit entries ({recentAlertEvents.length}) · active now ({activeAlerts.length})
+            Page {page} of {totalPages} · total emitted alerts ({totalAlertEvents}) · active now ({activeAlerts.length})
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -167,6 +205,12 @@ export default async function AdminAlertsPage() {
               ))}
             </div>
           )}
+
+          <PaginationControls
+            summary={`Showing ${recentAlertEvents.length} alert entries on this page`}
+            previousHref={createPageHref(Math.max(1, page - 1))}
+            nextHref={createPageHref(Math.min(totalPages, page + 1))}
+          />
         </CardContent>
       </Card>
     </div>

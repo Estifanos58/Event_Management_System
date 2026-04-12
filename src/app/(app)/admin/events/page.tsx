@@ -1,13 +1,17 @@
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { Select } from "@/components/ui/select";
 import { prisma } from "@/core/db/prisma";
+
+const PAGE_SIZE = 20;
 
 type AdminEventsPageProps = {
   searchParams: Promise<{
     q?: string;
     status?: string;
+    page?: string;
   }>;
 };
 
@@ -31,39 +35,69 @@ type EventRow = {
   };
 };
 
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(input: { page: number; q: string; status: string }) {
+  const qSegment = input.q.length > 0 ? `&q=${encodeURIComponent(input.q)}` : "";
+  const statusSegment = input.status !== "ALL" ? `&status=${encodeURIComponent(input.status)}` : "";
+  return `/admin/events?page=${input.page}${qSegment}${statusSegment}`;
+}
+
 export default async function AdminEventsPage({ searchParams }: AdminEventsPageProps) {
   const params = await searchParams;
   const q = params.q?.trim() ?? "";
   const status = params.status?.trim() ?? "ALL";
+  const requestedPage = parsePage(params.page);
+
+  const whereClause = {
+    ...(status !== "ALL" ? { status: status as never } : {}),
+    ...(q.length > 0
+      ? {
+          OR: [
+            {
+              title: {
+                contains: q,
+                mode: "insensitive" as const,
+              },
+            },
+            {
+              organization: {
+                displayName: {
+                  contains: q,
+                  mode: "insensitive" as const,
+                },
+              },
+            },
+          ],
+        }
+      : {}),
+  };
+
+  const totalEvents = await prisma.event.count({
+    where: whereClause,
+  });
+
+  const totalPages = Math.max(1, Math.ceil(totalEvents / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
 
   const events = (await prisma.event.findMany({
-    where: {
-      ...(status !== "ALL" ? { status: status as never } : {}),
-      ...(q.length > 0
-        ? {
-            OR: [
-              {
-                title: {
-                  contains: q,
-                  mode: "insensitive",
-                },
-              },
-              {
-                organization: {
-                  displayName: {
-                    contains: q,
-                    mode: "insensitive",
-                  },
-                },
-              },
-            ],
-          }
-        : {}),
-    },
+    where: whereClause,
     orderBy: {
       startAt: "desc",
     },
-    take: 200,
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
     select: {
       id: true,
       title: true,
@@ -113,6 +147,7 @@ export default async function AdminEventsPage({ searchParams }: AdminEventsPageP
         </CardHeader>
         <CardContent>
           <form method="get" className="grid gap-3 lg:grid-cols-[1fr_220px_auto]">
+            <input type="hidden" name="page" value="1" />
             <label className="text-sm font-medium text-gray-900">
               Search title or organization
               <Input className="mt-1" name="q" defaultValue={q} placeholder="Search events" />
@@ -143,8 +178,10 @@ export default async function AdminEventsPage({ searchParams }: AdminEventsPageP
 
       <Card>
         <CardHeader>
-          <CardTitle>Results ({events.length})</CardTitle>
-          <CardDescription>Showing up to 200 events for current filter.</CardDescription>
+          <CardTitle>Results ({totalEvents})</CardTitle>
+          <CardDescription>
+            Page {page} of {totalPages}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {events.length === 0 ? (
@@ -194,6 +231,20 @@ export default async function AdminEventsPage({ searchParams }: AdminEventsPageP
               </table>
             </div>
           )}
+
+          <PaginationControls
+            summary={`Showing ${events.length} events on this page`}
+            previousHref={createPageHref({
+              page: Math.max(1, page - 1),
+              q,
+              status,
+            })}
+            nextHref={createPageHref({
+              page: Math.min(totalPages, page + 1),
+              q,
+              status,
+            })}
+          />
         </CardContent>
       </Card>
     </div>

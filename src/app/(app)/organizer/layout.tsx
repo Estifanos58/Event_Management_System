@@ -26,6 +26,9 @@ export default async function OrganizerLayout({ children }: { children: React.Re
         <Link href="/organizer/events/new" className={navLinkClass}>
           Create event
         </Link>
+        <Link href="/organizer/reappeals" className={navLinkClass}>
+          Reappeals
+        </Link>
       </nav>
 
       {children}

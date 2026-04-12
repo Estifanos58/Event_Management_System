@@ -1,7 +1,10 @@
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
 import { requireDashboardSnapshot } from "@/app/(app)/_lib/access";
+
+const PAGE_SIZE = 15;
 
 type StaffAssignedEventRow = {
   id: string;
@@ -16,7 +19,32 @@ type StaffAssignedEventRow = {
   };
 };
 
-export default async function StaffEventsPage() {
+type StaffEventsPageProps = {
+  searchParams: Promise<{
+    page?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(page: number) {
+  return `/staff/events?page=${page}`;
+}
+
+export default async function StaffEventsPage({ searchParams }: StaffEventsPageProps) {
+  const params = await searchParams;
+  const requestedPage = parsePage(params.page);
   const snapshot = await requireDashboardSnapshot();
 
   const assignedEventIds = Array.from(
@@ -43,6 +71,17 @@ export default async function StaffEventsPage() {
     );
   }
 
+  const totalEvents = await prisma.event.count({
+    where: {
+      id: {
+        in: assignedEventIds,
+      },
+    },
+  });
+
+  const totalPages = Math.max(1, Math.ceil(totalEvents / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+
   const events = (await prisma.event.findMany({
     where: {
       id: {
@@ -52,6 +91,8 @@ export default async function StaffEventsPage() {
     orderBy: {
       startAt: "asc",
     },
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
     select: {
       id: true,
       title: true,
@@ -73,7 +114,7 @@ export default async function StaffEventsPage() {
       <CardHeader>
         <CardTitle>Assigned Events</CardTitle>
         <CardDescription>
-          Open event-day operations for your assigned events.
+          Open event-day operations for your assigned events. Page {page} of {totalPages}.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -118,6 +159,12 @@ export default async function StaffEventsPage() {
             </tbody>
           </table>
         </div>
+
+        <PaginationControls
+          summary={`Showing ${events.length} events on this page - ${totalEvents} assigned events`}
+          previousHref={createPageHref(Math.max(1, page - 1))}
+          nextHref={createPageHref(Math.min(totalPages, page + 1))}
+        />
       </CardContent>
     </Card>
   );

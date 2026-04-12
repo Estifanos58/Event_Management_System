@@ -1,7 +1,39 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
 
-export default async function AdminIntegrationsPage() {
+const INTEGRATION_EVENTS_PAGE_SIZE = 25;
+
+type AdminIntegrationsPageProps = {
+  searchParams: Promise<{
+    page?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(page: number) {
+  return `/admin/integrations?page=${page}`;
+}
+
+export default async function AdminIntegrationsPage({ searchParams }: AdminIntegrationsPageProps) {
+  const params = await searchParams;
+  const requestedPage = parsePage(params.page);
+  const totalInboundEvents = await prisma.inboundProviderEvent.count();
+  const totalPages = Math.max(1, Math.ceil(totalInboundEvents / INTEGRATION_EVENTS_PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+
   const [byProviderType, byStatus, latestInbound] = await Promise.all([
     prisma.inboundProviderEvent.groupBy({
       by: ["providerType"],
@@ -19,7 +51,8 @@ export default async function AdminIntegrationsPage() {
       orderBy: {
         createdAt: "desc",
       },
-      take: 120,
+      skip: (page - 1) * INTEGRATION_EVENTS_PAGE_SIZE,
+      take: INTEGRATION_EVENTS_PAGE_SIZE,
       select: {
         id: true,
         providerType: true,
@@ -87,7 +120,9 @@ export default async function AdminIntegrationsPage() {
       <Card>
         <CardHeader>
           <CardTitle>Latest Provider Events</CardTitle>
-          <CardDescription>Most recent inbound events with mapping and failure context.</CardDescription>
+          <CardDescription>
+            Page {page} of {totalPages} · {totalInboundEvents} inbound events
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {latestInbound.length === 0 ? (
@@ -119,6 +154,12 @@ export default async function AdminIntegrationsPage() {
               ))}
             </div>
           )}
+
+          <PaginationControls
+            summary={`Showing ${latestInbound.length} inbound events on this page`}
+            previousHref={createPageHref(Math.max(1, page - 1))}
+            nextHref={createPageHref(Math.min(totalPages, page + 1))}
+          />
         </CardContent>
       </Card>
     </div>

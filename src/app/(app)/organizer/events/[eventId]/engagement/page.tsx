@@ -1,6 +1,7 @@
 import { revalidatePath } from "next/cache";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { getEventDetailSnapshot } from "@/domains/events/service";
@@ -17,6 +18,25 @@ type DeliveryItem = {
   recipientAddress?: string;
   createdAt: string;
 };
+
+const DELIVERY_PAGE_SIZE = 20;
+
+function parsePage(value: string | string[] | undefined) {
+  if (typeof value !== "string") {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createDeliveryPageHref(eventId: string, page: number) {
+  return `/organizer/events/${eventId}/engagement?page=${page}`;
+}
 
 async function sendAnnouncementFormAction(formData: FormData) {
   "use server";
@@ -50,12 +70,16 @@ type OrganizerEventEngagementPageProps = {
   params: Promise<{
     eventId: string;
   }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
 
 export default async function OrganizerEventEngagementPage({
   params,
+  searchParams,
 }: OrganizerEventEngagementPageProps) {
   const { eventId } = await params;
+  const query = await searchParams;
+  const page = parsePage(query.page);
   const snapshot = await getEventDetailSnapshot(eventId);
 
   if (!snapshot) {
@@ -69,18 +93,29 @@ export default async function OrganizerEventEngagementPage({
   }
 
   const deliveriesResult = await listEventNotificationDeliveries(eventId, {
-    take: 100,
+    page,
+    pageSize: DELIVERY_PAGE_SIZE,
   })
     .then((result) => ({
-      deliveries: result as DeliveryItem[],
+      deliveries: result.items as DeliveryItem[],
+      total: result.total,
+      resolvedPage: result.page,
+      resolvedPageSize: result.pageSize,
       error: null as string | null,
     }))
     .catch((error: unknown) => ({
       deliveries: [] as DeliveryItem[],
+      total: 0,
+      resolvedPage: 1,
+      resolvedPageSize: DELIVERY_PAGE_SIZE,
       error: error instanceof Error ? error.message : "Failed to load deliveries.",
     }));
 
   const deliveries = deliveriesResult.deliveries;
+  const deliveriesPage = deliveriesResult.resolvedPage;
+  const deliveriesPageSize = deliveriesResult.resolvedPageSize;
+  const deliveriesTotal = deliveriesResult.total;
+  const totalDeliveryPages = Math.max(1, Math.ceil(deliveriesTotal / deliveriesPageSize));
   const deliveriesError = deliveriesResult.error;
 
   const queuedDeliveries = deliveries.filter(
@@ -243,31 +278,42 @@ export default async function OrganizerEventEngagementPage({
           ) : deliveries.length === 0 ? (
             <p className="text-sm text-gray-500">No deliveries have been generated for this event yet.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-full border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 text-left text-xs uppercase tracking-widest text-gray-500">
-                    <th className="py-2 pr-4">Type</th>
-                    <th className="py-2 pr-4">Channel</th>
-                    <th className="py-2 pr-4">Status</th>
-                    <th className="py-2 pr-4">Recipient</th>
-                    <th className="py-2">Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {deliveries.slice(0, 40).map((delivery) => (
-                    <tr key={delivery.id} className="border-b border-gray-200/60 align-top">
-                      <td className="py-3 pr-4 text-gray-500">{delivery.type}</td>
-                      <td className="py-3 pr-4 text-gray-500">{delivery.channel}</td>
-                      <td className="py-3 pr-4 text-gray-500">{delivery.status}</td>
-                      <td className="py-3 pr-4 text-gray-500">{delivery.recipientAddress ?? "-"}</td>
-                      <td className="py-3 text-gray-500">
-                        {new Date(delivery.createdAt).toLocaleString()}
-                      </td>
+            <div className="space-y-3">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-left text-xs uppercase tracking-widest text-gray-500">
+                      <th className="py-2 pr-4">Type</th>
+                      <th className="py-2 pr-4">Channel</th>
+                      <th className="py-2 pr-4">Status</th>
+                      <th className="py-2 pr-4">Recipient</th>
+                      <th className="py-2">Created</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {deliveries.map((delivery) => (
+                      <tr key={delivery.id} className="border-b border-gray-200/60 align-top">
+                        <td className="py-3 pr-4 text-gray-500">{delivery.type}</td>
+                        <td className="py-3 pr-4 text-gray-500">{delivery.channel}</td>
+                        <td className="py-3 pr-4 text-gray-500">{delivery.status}</td>
+                        <td className="py-3 pr-4 text-gray-500">{delivery.recipientAddress ?? "-"}</td>
+                        <td className="py-3 text-gray-500">
+                          {new Date(delivery.createdAt).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <PaginationControls
+                summary={`Page ${deliveriesPage} of ${totalDeliveryPages} - ${deliveriesTotal} deliveries`}
+                previousHref={createDeliveryPageHref(eventId, Math.max(1, deliveriesPage - 1))}
+                nextHref={createDeliveryPageHref(
+                  eventId,
+                  Math.min(totalDeliveryPages, deliveriesPage + 1),
+                )}
+              />
             </div>
           )}
         </CardContent>

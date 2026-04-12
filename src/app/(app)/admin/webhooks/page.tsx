@@ -1,5 +1,9 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
+
+const ENDPOINT_PAGE_SIZE = 20;
+const DEAD_LETTER_PAGE_SIZE = 20;
 
 type EndpointRow = {
   id: string;
@@ -30,13 +34,56 @@ type DeadLetterRow = {
   };
 };
 
-export default async function AdminWebhooksPage() {
+type AdminWebhooksPageProps = {
+  searchParams: Promise<{
+    endpointPage?: string;
+    deadLetterPage?: string;
+  }>;
+};
+
+function parsePage(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(input: { endpointPage: number; deadLetterPage: number }) {
+  return `/admin/webhooks?endpointPage=${input.endpointPage}&deadLetterPage=${input.deadLetterPage}`;
+}
+
+export default async function AdminWebhooksPage({ searchParams }: AdminWebhooksPageProps) {
+  const params = await searchParams;
+  const requestedEndpointPage = parsePage(params.endpointPage);
+  const requestedDeadLetterPage = parsePage(params.deadLetterPage);
+
+  const [totalEndpoints, totalDeadLetters] = await Promise.all([
+    prisma.webhookEndpoint.count(),
+    prisma.webhookOutboxEvent.count({
+      where: {
+        status: "DEAD_LETTER",
+      },
+    }),
+  ]);
+
+  const endpointTotalPages = Math.max(1, Math.ceil(totalEndpoints / ENDPOINT_PAGE_SIZE));
+  const deadLetterTotalPages = Math.max(1, Math.ceil(totalDeadLetters / DEAD_LETTER_PAGE_SIZE));
+  const endpointPage = Math.min(requestedEndpointPage, endpointTotalPages);
+  const deadLetterPage = Math.min(requestedDeadLetterPage, deadLetterTotalPages);
+
   const [endpoints, outboxByStatus, deliveryStats, deadLetters] = await Promise.all([
     prisma.webhookEndpoint.findMany({
       orderBy: {
         updatedAt: "desc",
       },
-      take: 120,
+      skip: (endpointPage - 1) * ENDPOINT_PAGE_SIZE,
+      take: ENDPOINT_PAGE_SIZE,
       select: {
         id: true,
         name: true,
@@ -82,7 +129,8 @@ export default async function AdminWebhooksPage() {
       orderBy: {
         updatedAt: "desc",
       },
-      take: 80,
+      skip: (deadLetterPage - 1) * DEAD_LETTER_PAGE_SIZE,
+      take: DEAD_LETTER_PAGE_SIZE,
       select: {
         id: true,
         eventType: true,
@@ -136,7 +184,9 @@ export default async function AdminWebhooksPage() {
         <Card>
           <CardHeader>
             <CardTitle>Endpoint Inventory</CardTitle>
-            <CardDescription>Latest webhook endpoints across organizations and events.</CardDescription>
+            <CardDescription>
+              Page {endpointPage} of {endpointTotalPages} · {totalEndpoints} endpoints
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {endpoints.length === 0 ? (
@@ -161,13 +211,27 @@ export default async function AdminWebhooksPage() {
                 ))}
               </div>
             )}
+
+            <PaginationControls
+              summary={`Showing ${endpoints.length} endpoints on this page`}
+              previousHref={createPageHref({
+                endpointPage: Math.max(1, endpointPage - 1),
+                deadLetterPage,
+              })}
+              nextHref={createPageHref({
+                endpointPage: Math.min(endpointTotalPages, endpointPage + 1),
+                deadLetterPage,
+              })}
+            />
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle>Dead-letter Queue</CardTitle>
-            <CardDescription>Failed outbox events requiring replay or remediation.</CardDescription>
+            <CardDescription>
+              Page {deadLetterPage} of {deadLetterTotalPages} · {totalDeadLetters} dead-letter events
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {deadLetters.length === 0 ? (
@@ -189,6 +253,18 @@ export default async function AdminWebhooksPage() {
                 ))}
               </div>
             )}
+
+            <PaginationControls
+              summary={`Showing ${deadLetters.length} dead-letter events on this page`}
+              previousHref={createPageHref({
+                endpointPage,
+                deadLetterPage: Math.max(1, deadLetterPage - 1),
+              })}
+              nextHref={createPageHref({
+                endpointPage,
+                deadLetterPage: Math.min(deadLetterTotalPages, deadLetterPage + 1),
+              })}
+            />
           </CardContent>
         </Card>
       </div>

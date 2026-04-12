@@ -8,6 +8,7 @@ import {
   type OrderTableRow,
 } from "@/components/organizer/tables/orders-table";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PaginationControls } from "@/components/ui/pagination-controls";
 import { prisma } from "@/core/db/prisma";
 import { getEventDetailSnapshot } from "@/domains/events/service";
 
@@ -15,12 +16,38 @@ type OrganizerEventAttendeesPageProps = {
   params: Promise<{
     eventId: string;
   }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
+
+const PAGE_SIZE = 10;
+
+function parsePage(value: string | string[] | undefined) {
+  if (typeof value !== "string") {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function createPageHref(eventId: string, ticketPage: number, orderPage: number) {
+  return `/organizer/events/${eventId}/attendees?ticketPage=${ticketPage}&orderPage=${orderPage}`;
+}
 
 export default async function OrganizerEventAttendeesPage({
   params,
+  searchParams,
 }: OrganizerEventAttendeesPageProps) {
   const { eventId } = await params;
+  const query = await searchParams;
+  const ticketPage = parsePage(query.ticketPage);
+  const orderPage = parsePage(query.orderPage);
+  const ticketSkip = (ticketPage - 1) * PAGE_SIZE;
+  const orderSkip = (orderPage - 1) * PAGE_SIZE;
   const snapshot = await getEventDetailSnapshot(eventId);
 
   if (!snapshot) {
@@ -33,7 +60,7 @@ export default async function OrganizerEventAttendeesPage({
     );
   }
 
-  const [tickets, orders] = await Promise.all([
+  const [tickets, orders, attendeeTicketsCount, checkedInCount, orderCount] = await Promise.all([
     prisma.ticket.findMany({
       where: {
         eventId,
@@ -41,7 +68,8 @@ export default async function OrganizerEventAttendeesPage({
       orderBy: {
         issuedAt: "desc",
       },
-      take: 200,
+      skip: ticketSkip,
+      take: PAGE_SIZE,
       select: {
         id: true,
         status: true,
@@ -49,6 +77,7 @@ export default async function OrganizerEventAttendeesPage({
         orderId: true,
         attendee: {
           select: {
+            id: true,
             name: true,
             email: true,
           },
@@ -76,7 +105,8 @@ export default async function OrganizerEventAttendeesPage({
       orderBy: {
         createdAt: "desc",
       },
-      take: 200,
+      skip: orderSkip,
+      take: PAGE_SIZE,
       select: {
         id: true,
         status: true,
@@ -101,10 +131,31 @@ export default async function OrganizerEventAttendeesPage({
         },
       },
     }),
+    prisma.ticket.count({
+      where: {
+        eventId,
+      },
+    }),
+    prisma.ticket.count({
+      where: {
+        eventId,
+        checkInEvents: {
+          some: {
+            status: CheckInStatus.ACCEPTED,
+          },
+        },
+      },
+    }),
+    prisma.order.count({
+      where: {
+        eventId,
+      },
+    }),
   ]);
 
   const attendeeRows: AttendeeTableRow[] = tickets.map((ticket) => ({
     ticketId: ticket.id,
+    attendeeUserId: ticket.attendee.id,
     attendeeName: ticket.attendee.name?.trim() || "Unnamed attendee",
     attendeeEmail: ticket.attendee.email,
     ticketClass: ticket.ticketClass.name,
@@ -126,7 +177,8 @@ export default async function OrganizerEventAttendeesPage({
     createdAt: order.createdAt.toISOString(),
   }));
 
-  const checkedInCount = attendeeRows.filter((row) => row.checkedIn).length;
+  const totalTicketPages = Math.max(1, Math.ceil(attendeeTicketsCount / PAGE_SIZE));
+  const totalOrderPages = Math.max(1, Math.ceil(orderCount / PAGE_SIZE));
 
   return (
     <div className="space-y-6">
@@ -140,7 +192,7 @@ export default async function OrganizerEventAttendeesPage({
         <CardContent className="grid gap-3 sm:grid-cols-3">
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
             <p className="text-xs uppercase tracking-widest text-gray-500">Attendee tickets</p>
-            <p className="mt-2 text-2xl font-semibold text-gray-900">{attendeeRows.length}</p>
+            <p className="mt-2 text-2xl font-semibold text-gray-900">{attendeeTicketsCount}</p>
           </div>
 
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
@@ -150,7 +202,7 @@ export default async function OrganizerEventAttendeesPage({
 
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
             <p className="text-xs uppercase tracking-widest text-gray-500">Orders</p>
-            <p className="mt-2 text-2xl font-semibold text-gray-900">{orderRows.length}</p>
+            <p className="mt-2 text-2xl font-semibold text-gray-900">{orderCount}</p>
           </div>
         </CardContent>
       </Card>
@@ -163,7 +215,21 @@ export default async function OrganizerEventAttendeesPage({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <AttendeesTable rows={attendeeRows} />
+          <AttendeesTable
+            rows={attendeeRows}
+            organizationId={snapshot.event.orgId}
+            eventId={eventId}
+          />
+
+          <PaginationControls
+            summary={`Ticket page ${ticketPage} of ${totalTicketPages}`}
+            previousHref={createPageHref(eventId, Math.max(1, ticketPage - 1), orderPage)}
+            nextHref={createPageHref(
+              eventId,
+              Math.min(totalTicketPages, ticketPage + 1),
+              orderPage,
+            )}
+          />
         </CardContent>
       </Card>
 
@@ -176,6 +242,12 @@ export default async function OrganizerEventAttendeesPage({
         </CardHeader>
         <CardContent>
           <OrdersTable rows={orderRows} />
+
+          <PaginationControls
+            summary={`Order page ${orderPage} of ${totalOrderPages}`}
+            previousHref={createPageHref(eventId, ticketPage, Math.max(1, orderPage - 1))}
+            nextHref={createPageHref(eventId, ticketPage, Math.min(totalOrderPages, orderPage + 1))}
+          />
         </CardContent>
       </Card>
     </div>

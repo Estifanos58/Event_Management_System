@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Calendar, Clock3, MapPin, ShieldCheck, Star, Wifi } from "lucide-react";
+import { Calendar, Clock3, MapPin, Star, Wifi } from "lucide-react";
+import { EventFeedbackPanel } from "@/components/attendee/event-feedback-panel";
+import { ReportTargetButton } from "@/components/moderation/report-target-button";
 import { getDiscoverableEventDetail } from "@/domains/discovery/service";
 
 const FALLBACK_EVENT_COVER =
@@ -122,6 +124,20 @@ export default async function DiscoverEventDetailPage({
             >
               Reserve tickets
             </Link>
+            <ReportTargetButton
+              eventId={detail.id}
+              targetType="EVENT"
+              targetId={detail.id}
+              targetLabel={detail.title}
+              triggerLabel="Report event"
+            />
+            <ReportTargetButton
+              eventId={detail.id}
+              targetType="ORGANIZER"
+              targetId={detail.organizer.id}
+              targetLabel={detail.organizer.name}
+              triggerLabel="Report organizer"
+            />
             <Link href="/discover" className="text-sm font-medium text-orange-500 hover:text-orange-600">
               Back to discover
             </Link>
@@ -238,38 +254,16 @@ export default async function DiscoverEventDetailPage({
         </div>
       </section>
 
-      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900">Attendee Feedback</h2>
-        <p className="mt-2 text-sm text-gray-500">
-          {detail.feedbackSummary.ratingCount === 0
-            ? "No feedback has been submitted for this event yet."
-            : `${detail.feedbackSummary.ratingCount} ratings with an average of ${detail.feedbackSummary.ratingAverage.toFixed(1)}.`}
-        </p>
-
-        {detail.feedbackSummary.tagFrequency.length > 0 ? (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {detail.feedbackSummary.tagFrequency.map((tag) => (
-              <span
-                key={tag.tag}
-                className="rounded-full bg-orange-50 px-3 py-1 text-xs font-medium text-orange-700"
-              >
-                {tag.tag} ({tag.count})
-              </span>
-            ))}
-          </div>
-        ) : null}
-
-        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4">
-          <p className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-            <ShieldCheck className="h-4 w-4 text-orange-500" /> Feedback Eligibility
-          </p>
-          <p className="mt-1 text-xs text-gray-500">{detail.feedbackEligibility.reason}</p>
-          <p className="mt-1 text-xs text-gray-500">
-            Status: {detail.feedbackEligibility.eligible ? "Eligible" : "Not eligible"}
-            {detail.feedbackEligibility.alreadySubmitted ? " · Already submitted" : ""}
-          </p>
-        </div>
-      </section>
+      <EventFeedbackPanel
+        eventId={detail.id}
+        initialState={{
+          feedbackSummary: detail.feedbackSummary,
+          feedbackEligibility: detail.feedbackEligibility,
+          entries: detail.feedbackEntries,
+          entryPagination: detail.feedbackEntryPagination,
+          viewerFeedback: detail.viewerFeedback,
+        }}
+      />
     </div>
   );
 }
