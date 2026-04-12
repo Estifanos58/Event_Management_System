@@ -54,6 +54,7 @@ import {
   requirePermission,
 } from "@/domains/identity/guards";
 import { ROLE_DEFAULT_PERMISSIONS } from "@/domains/identity/types";
+import { findBlockingUserBanForOrganization } from "@/domains/moderation/service";
 import {
   enqueueSystemNotification,
   enqueueOrderConfirmationNotification,
@@ -988,6 +989,15 @@ export async function createReservation(eventId: string, input: CreateReservatio
   const authz = await requireTicketingSelfServicePermission(eventId, "ticketing.reservation.create");
   const event = await loadEventForTicketing(eventId);
 
+  const blockingBan = await findBlockingUserBanForOrganization(event.orgId, authz.session.user.id);
+  if (blockingBan) {
+    throw new TicketingDomainError(
+      403,
+      "INVALID_STATE",
+      "Your account is currently restricted from booking tickets for this organization.",
+    );
+  }
+
   ensureEventOpenForReservations(event);
 
   const existingReservation = await prisma.reservation.findUnique({
@@ -1728,6 +1738,15 @@ export async function createCheckoutOrder(eventId: string, reservationId: string
 
   const totals = computeOrderTotals(ticketClassMap, reservation.items, parsedInput.promoCode);
   const event = await loadEventForTicketing(eventId);
+
+  const blockingBan = await findBlockingUserBanForOrganization(event.orgId, authz.session.user.id);
+  if (blockingBan) {
+    throw new TicketingDomainError(
+      403,
+      "INVALID_STATE",
+      "Your account is currently restricted from checkout for this organization.",
+    );
+  }
 
   const currency = reservation.items.length
     ? ticketClassMap.get(reservation.items[0].ticketClassId)?.currency ?? "USD"
