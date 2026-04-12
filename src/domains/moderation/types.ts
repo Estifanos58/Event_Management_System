@@ -1,4 +1,12 @@
-import { AbuseReportStatus, AbuseTargetType, RiskSeverity, RiskStatus } from "@prisma/client";
+import {
+  AbuseReportStatus,
+  AbuseTargetType,
+  ModerationAppealStatus,
+  ModerationBanScope,
+  ModerationBanStatus,
+  RiskSeverity,
+  RiskStatus,
+} from "@prisma/client";
 
 export type SubmitAbuseReportInput = {
   targetType?: unknown;
@@ -14,6 +22,8 @@ export type AbuseReportListQuery = {
   status?: unknown;
   targetType?: unknown;
   take?: unknown;
+  page?: unknown;
+  pageSize?: unknown;
 };
 
 export type UpdateAbuseReportStatusInput = {
@@ -36,6 +46,91 @@ export type ModerationCaseListQuery = {
   status?: unknown;
   severity?: unknown;
   take?: unknown;
+  page?: unknown;
+  pageSize?: unknown;
+};
+
+export type CreateModerationBanInput = {
+  scope?: unknown;
+  reason?: unknown;
+  subjectUserId?: unknown;
+  subjectOrganizationId?: unknown;
+  scopeOrganizationId?: unknown;
+  sourceReportId?: unknown;
+  sourceRiskCaseId?: unknown;
+  metadata?: unknown;
+};
+
+export type ModerationBanListQuery = {
+  scope?: unknown;
+  status?: unknown;
+  page?: unknown;
+  pageSize?: unknown;
+};
+
+export type CreateModerationAppealInput = {
+  banId?: unknown;
+  message?: unknown;
+  metadata?: unknown;
+};
+
+export type ReviewModerationAppealInput = {
+  decision?: unknown;
+  note?: unknown;
+};
+
+export type ModerationAppealListQuery = {
+  status?: unknown;
+  page?: unknown;
+  pageSize?: unknown;
+};
+
+export type ModerationBanEntry = {
+  id: string;
+  scope: ModerationBanScope;
+  status: ModerationBanStatus;
+  reason: string;
+  subjectUserId: string | null;
+  subjectOrganizationId: string | null;
+  subjectOrganizationName: string | null;
+  scopeOrganizationId: string | null;
+  scopeOrganizationName: string | null;
+  sourceReportId: string | null;
+  sourceRiskCaseId: string | null;
+  createdBy: string;
+  liftedBy: string | null;
+  liftedAt: string | null;
+  createdAt: string;
+};
+
+export type ModerationAppealEntry = {
+  id: string;
+  banId: string;
+  requesterId: string;
+  requesterName: string;
+  requesterEmail: string;
+  status: ModerationAppealStatus;
+  message: string;
+  reviewerNote: string | null;
+  reviewedBy: string | null;
+  reviewedByName: string | null;
+  createdAt: string;
+  reviewedAt: string | null;
+  ban: ModerationBanEntry;
+};
+
+export type PagedModerationBans = {
+  items: ModerationBanEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
+export type PagedModerationAppeals = {
+  items: ModerationAppealEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
 };
 
 export type TransitionModerationCaseInput = {

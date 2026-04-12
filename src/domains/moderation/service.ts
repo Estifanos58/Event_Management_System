@@ -3,8 +3,12 @@ import {
   AbuseTargetType,
   EventStatus,
   EventVisibility,
+  ModerationAppealStatus,
+  ModerationBanScope,
+  ModerationBanStatus,
   NotificationType,
   Prisma,
+  Role,
   RiskSeverity,
   RiskStatus,
   ScopeType,
@@ -12,20 +16,34 @@ import {
 } from "@prisma/client";
 import { z } from "zod";
 import { writeAuditEvent } from "@/core/audit/audit";
+import { getServerSessionOrNull } from "@/core/auth/session";
 import { prisma } from "@/core/db/prisma";
 import { env } from "@/core/env";
-import { createAccessContext, requirePermission } from "@/domains/identity/guards";
+import {
+  AuthorizationError,
+  createAccessContext,
+  requirePermission,
+} from "@/domains/identity/guards";
 import { ModerationDomainError } from "@/domains/moderation/errors";
 import { enqueueSystemNotification } from "@/domains/notifications/service";
 import type {
   AbuseReportListQuery,
   ApplyModerationEnforcementInput,
+  CreateModerationAppealInput,
+  CreateModerationBanInput,
   CreateModerationCaseInput,
   EventTrustSignals,
+  ModerationAppealEntry,
+  ModerationAppealListQuery,
+  ModerationBanEntry,
+  ModerationBanListQuery,
   ModerationCaseListQuery,
   ModerationEnforcementAction,
   ModerationQueueItem,
   ModerationQueueSnapshot,
+  PagedModerationAppeals,
+  PagedModerationBans,
+  ReviewModerationAppealInput,
   SubmitAbuseReportInput,
   TransitionModerationCaseInput,
   UpdateAbuseReportStatusInput,
@@ -36,6 +54,7 @@ const OPEN_REPORT_STATUSES = [
   AbuseReportStatus.UNDER_REVIEW,
 ] as const;
 const OPEN_CASE_STATUSES = [RiskStatus.OPEN, RiskStatus.INVESTIGATING] as const;
+const PLATFORM_SCOPE_ID = "platform";
 
 const ABUSE_REPORT_TRANSITIONS: Record<AbuseReportStatus, AbuseReportStatus[]> = {
   [AbuseReportStatus.OPEN]: [
@@ -82,6 +101,11 @@ const CATEGORY_ALLOWLIST: Record<AbuseTargetType, Set<string>> = {
     "REPEATED_CANCELLATIONS",
     "POOR_MANAGEMENT",
     "ABUSE_OR_HARASSMENT",
+    "OTHER",
+  ]),
+  [AbuseTargetType.USER]: new Set([
+    "ABUSE_OR_HARASSMENT",
+    "FRAUD_SCAM",
     "OTHER",
   ]),
   [AbuseTargetType.PLATFORM]: new Set([
@@ -155,6 +179,41 @@ const applyModerationEnforcementInputSchema = z.object({
   reportId: z.string().trim().min(1).max(120).optional(),
   riskCaseId: z.string().trim().min(1).max(120).optional(),
   metadata: z.unknown().optional(),
+});
+
+const createModerationBanInputSchema = z.object({
+  scope: z.enum(ModerationBanScope),
+  reason: z.string().trim().min(4).max(300),
+  subjectUserId: z.string().trim().min(1).max(120).optional(),
+  subjectOrganizationId: z.string().trim().min(1).max(120).optional(),
+  scopeOrganizationId: z.string().trim().min(1).max(120).optional(),
+  sourceReportId: z.string().trim().min(1).max(120).optional(),
+  sourceRiskCaseId: z.string().trim().min(1).max(120).optional(),
+  metadata: z.unknown().optional(),
+});
+
+const moderationBanListQuerySchema = z.object({
+  scope: z.enum(ModerationBanScope).optional(),
+  status: z.enum(ModerationBanStatus).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+const createModerationAppealInputSchema = z.object({
+  banId: z.string().trim().min(1).max(120),
+  message: z.string().trim().min(8).max(2_000),
+  metadata: z.unknown().optional(),
+});
+
+const moderationAppealListQuerySchema = z.object({
+  status: z.enum(ModerationAppealStatus).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+const reviewModerationAppealInputSchema = z.object({
+  decision: z.enum([ModerationAppealStatus.APPROVED, ModerationAppealStatus.REJECTED]),
+  note: z.string().trim().max(500).optional(),
 });
 
 function now() {
@@ -334,6 +393,230 @@ function parseApplyModerationEnforcementInput(input: ApplyModerationEnforcementI
   };
 }
 
+function parseCreateModerationBanInput(input: CreateModerationBanInput) {
+  const parsed = createModerationBanInputSchema.parse(input);
+
+  const normalized = {
+    scope: parsed.scope,
+    reason: parsed.reason,
+    subjectUserId: normalizeOptionalText(parsed.subjectUserId),
+    subjectOrganizationId: normalizeOptionalText(parsed.subjectOrganizationId),
+    scopeOrganizationId: normalizeOptionalText(parsed.scopeOrganizationId),
+    sourceReportId: normalizeOptionalText(parsed.sourceReportId),
+    sourceRiskCaseId: normalizeOptionalText(parsed.sourceRiskCaseId),
+    metadata: parsed.metadata,
+  };
+
+  if (normalized.scope === ModerationBanScope.GLOBAL_USER) {
+    if (!normalized.subjectUserId) {
+      throw new ModerationDomainError(
+        422,
+        "UNPROCESSABLE_MODERATION",
+        "subjectUserId is required for GLOBAL_USER bans.",
+      );
+    }
+  }
+
+  if (normalized.scope === ModerationBanScope.GLOBAL_ORGANIZATION) {
+    if (!normalized.subjectOrganizationId) {
+      throw new ModerationDomainError(
+        422,
+        "UNPROCESSABLE_MODERATION",
+        "subjectOrganizationId is required for GLOBAL_ORGANIZATION bans.",
+      );
+    }
+  }
+
+  if (normalized.scope === ModerationBanScope.ORGANIZATION_USER) {
+    if (!normalized.subjectUserId || !normalized.scopeOrganizationId) {
+      throw new ModerationDomainError(
+        422,
+        "UNPROCESSABLE_MODERATION",
+        "subjectUserId and scopeOrganizationId are required for ORGANIZATION_USER bans.",
+      );
+    }
+  }
+
+  return normalized;
+}
+
+function parseModerationBanListQuery(input: ModerationBanListQuery) {
+  const parsed = moderationBanListQuerySchema.parse(input);
+
+  return {
+    scope: parsed.scope,
+    status: parsed.status,
+    page: parsed.page ?? 1,
+    pageSize: parsed.pageSize ?? 20,
+  };
+}
+
+function parseCreateModerationAppealInput(input: CreateModerationAppealInput) {
+  const parsed = createModerationAppealInputSchema.parse(input);
+
+  return {
+    banId: parsed.banId,
+    message: parsed.message,
+    metadata: parsed.metadata,
+  };
+}
+
+function parseModerationAppealListQuery(input: ModerationAppealListQuery) {
+  const parsed = moderationAppealListQuerySchema.parse(input);
+
+  return {
+    status: parsed.status,
+    page: parsed.page ?? 1,
+    pageSize: parsed.pageSize ?? 20,
+  };
+}
+
+function parseReviewModerationAppealInput(input: ReviewModerationAppealInput) {
+  const parsed = reviewModerationAppealInputSchema.parse(input);
+
+  return {
+    decision: parsed.decision,
+    note: normalizeOptionalText(parsed.note),
+  };
+}
+
+async function requirePlatformAdminPermission(action: string, targetType: string, targetId: string) {
+  return requirePermission({
+    context: createAccessContext(ScopeType.PLATFORM, PLATFORM_SCOPE_ID),
+    permission: "platform.admin",
+    action,
+    targetType,
+    targetId,
+  });
+}
+
+async function requireOrganizationManagePermission(
+  organizationId: string,
+  action: string,
+  targetType: string,
+  targetId: string,
+) {
+  return requirePermission({
+    context: createAccessContext(ScopeType.ORGANIZATION, organizationId),
+    permission: "org.manage",
+    action,
+    targetType,
+    targetId,
+  });
+}
+
+function toBanEntry(
+  ban: {
+    id: string;
+    scope: ModerationBanScope;
+    status: ModerationBanStatus;
+    reason: string;
+    subjectUserId: string | null;
+    subjectOrganizationId: string | null;
+    scopeOrganizationId: string | null;
+    sourceReportId: string | null;
+    sourceRiskCaseId: string | null;
+    createdBy: string;
+    liftedBy: string | null;
+    liftedAt: Date | null;
+    createdAt: Date;
+    subjectOrganization?: {
+      displayName: string;
+    } | null;
+    scopeOrganization?: {
+      displayName: string;
+    } | null;
+  },
+): ModerationBanEntry {
+  return {
+    id: ban.id,
+    scope: ban.scope,
+    status: ban.status,
+    reason: ban.reason,
+    subjectUserId: ban.subjectUserId,
+    subjectOrganizationId: ban.subjectOrganizationId,
+    subjectOrganizationName: ban.subjectOrganization?.displayName ?? null,
+    scopeOrganizationId: ban.scopeOrganizationId,
+    scopeOrganizationName: ban.scopeOrganization?.displayName ?? null,
+    sourceReportId: ban.sourceReportId,
+    sourceRiskCaseId: ban.sourceRiskCaseId,
+    createdBy: ban.createdBy,
+    liftedBy: ban.liftedBy,
+    liftedAt: ban.liftedAt?.toISOString() ?? null,
+    createdAt: ban.createdAt.toISOString(),
+  };
+}
+
+function toAppealEntry(
+  appeal: {
+    id: string;
+    banId: string;
+    requesterId: string;
+    status: ModerationAppealStatus;
+    message: string;
+    reviewerNote: string | null;
+    reviewedBy: string | null;
+    createdAt: Date;
+    reviewedAt: Date | null;
+    requester: {
+      name: string;
+      email: string;
+    };
+    reviewer: {
+      name: string;
+    } | null;
+    ban: {
+      id: string;
+      scope: ModerationBanScope;
+      status: ModerationBanStatus;
+      reason: string;
+      subjectUserId: string | null;
+      subjectOrganizationId: string | null;
+      scopeOrganizationId: string | null;
+      sourceReportId: string | null;
+      sourceRiskCaseId: string | null;
+      createdBy: string;
+      liftedBy: string | null;
+      liftedAt: Date | null;
+      createdAt: Date;
+      subjectOrganization: {
+        displayName: string;
+      } | null;
+      scopeOrganization: {
+        displayName: string;
+      } | null;
+    };
+  },
+): ModerationAppealEntry {
+  return {
+    id: appeal.id,
+    banId: appeal.banId,
+    requesterId: appeal.requesterId,
+    requesterName: appeal.requester.name,
+    requesterEmail: appeal.requester.email,
+    status: appeal.status,
+    message: appeal.message,
+    reviewerNote: appeal.reviewerNote,
+    reviewedBy: appeal.reviewedBy,
+    reviewedByName: appeal.reviewer?.name ?? null,
+    createdAt: appeal.createdAt.toISOString(),
+    reviewedAt: appeal.reviewedAt?.toISOString() ?? null,
+    ban: toBanEntry(appeal.ban),
+  };
+}
+
+function buildBanMessageForNotification(ban: ModerationBanEntry) {
+  if (ban.scope === ModerationBanScope.GLOBAL_USER) {
+    return "Your account has been globally restricted by moderation.";
+  }
+
+  if (ban.scope === ModerationBanScope.GLOBAL_ORGANIZATION) {
+    return `Organization ${ban.subjectOrganizationName ?? ban.subjectOrganizationId ?? ""} has been restricted.`.trim();
+  }
+
+  return `Your account has been restricted from organizer operations in ${ban.scopeOrganizationName ?? "the selected organization"}.`;
+}
+
 function resolveReportTargetId(
   event: { id: string; orgId: string },
   input: ReturnType<typeof parseSubmitAbuseReportInput>,
@@ -366,7 +649,27 @@ function resolveReportTargetId(
     return targetId;
   }
 
-  return input.targetId ?? "platform";
+  if (input.targetType === AbuseTargetType.USER) {
+    if (!input.targetId) {
+      throw new ModerationDomainError(
+        422,
+        "UNPROCESSABLE_MODERATION",
+        "User abuse reports require a target user id.",
+      );
+    }
+
+    return input.targetId;
+  }
+
+  if (!input.targetId) {
+    throw new ModerationDomainError(
+      422,
+      "UNPROCESSABLE_MODERATION",
+      "Platform abuse reports require a target id.",
+    );
+  }
+
+  return input.targetId;
 }
 
 async function ensureRiskCaseForReport(input: {
@@ -1293,4 +1596,984 @@ export async function getEventTrustSignals(eventId: string): Promise<EventTrustS
     },
     riskIndicators,
   };
+}
+
+async function getPlatformAdminUserIds() {
+  const rows = await prisma.roleBinding.findMany({
+    where: {
+      role: Role.SUPER_ADMIN,
+      scopeType: ScopeType.PLATFORM,
+    },
+    select: {
+      userId: true,
+    },
+    distinct: ["userId"],
+    take: 10_000,
+  });
+
+  return rows.map((row) => row.userId);
+}
+
+async function getOrganizationManagerUserIds(organizationId: string) {
+  const rows = await prisma.roleBinding.findMany({
+    where: {
+      scopeType: ScopeType.ORGANIZATION,
+      scopeId: organizationId,
+      role: {
+        in: [Role.ORGANIZER, Role.SUPER_ADMIN],
+      },
+    },
+    select: {
+      userId: true,
+    },
+    distinct: ["userId"],
+    take: 10_000,
+  });
+
+  return rows.map((row) => row.userId);
+}
+
+async function requireBanCreationPermission(input: {
+  scope: ModerationBanScope;
+  scopeOrganizationId?: string;
+}) {
+  if (
+    input.scope === ModerationBanScope.GLOBAL_USER ||
+    input.scope === ModerationBanScope.GLOBAL_ORGANIZATION
+  ) {
+    const adminAuthz = await requirePlatformAdminPermission(
+      "moderation.ban.create",
+      "ModerationBan",
+      input.scope,
+    );
+
+    return {
+      session: adminAuthz.session,
+      isPlatformAdmin: true,
+    };
+  }
+
+  try {
+    const adminAuthz = await requirePlatformAdminPermission(
+      "moderation.ban.create",
+      "ModerationBan",
+      input.scopeOrganizationId ?? "organization",
+    );
+
+    return {
+      session: adminAuthz.session,
+      isPlatformAdmin: true,
+    };
+  } catch (error) {
+    if (!(error instanceof AuthorizationError) || error.status !== 403) {
+      throw error;
+    }
+  }
+
+  if (!input.scopeOrganizationId) {
+    throw new ModerationDomainError(
+      422,
+      "UNPROCESSABLE_MODERATION",
+      "scopeOrganizationId is required for organizer-scoped user bans.",
+    );
+  }
+
+  const organizationAuthz = await requireOrganizationManagePermission(
+    input.scopeOrganizationId,
+    "moderation.ban.create",
+    "ModerationBan",
+    input.scopeOrganizationId,
+  );
+
+  return {
+    session: organizationAuthz.session,
+    isPlatformAdmin: false,
+  };
+}
+
+async function requireAppealReviewPermission(input: {
+  appealId: string;
+  banScope: ModerationBanScope;
+  scopeOrganizationId?: string | null;
+}) {
+  try {
+    const adminAuthz = await requirePlatformAdminPermission(
+      "moderation.appeal.review",
+      "ModerationAppeal",
+      input.appealId,
+    );
+
+    return {
+      session: adminAuthz.session,
+      isPlatformAdmin: true,
+    };
+  } catch (error) {
+    if (!(error instanceof AuthorizationError) || error.status !== 403) {
+      throw error;
+    }
+  }
+
+  if (
+    input.banScope !== ModerationBanScope.ORGANIZATION_USER ||
+    !input.scopeOrganizationId
+  ) {
+    throw new AuthorizationError(403, "You do not have permission to review this appeal.");
+  }
+
+  const organizerAuthz = await requireOrganizationManagePermission(
+    input.scopeOrganizationId,
+    "moderation.appeal.review",
+    "ModerationAppeal",
+    input.appealId,
+  );
+
+  return {
+    session: organizerAuthz.session,
+    isPlatformAdmin: false,
+  };
+}
+
+async function assertAppealRequesterPermission(input: {
+  banId: string;
+  scope: ModerationBanScope;
+  subjectUserId?: string | null;
+  subjectOrganizationId?: string | null;
+  scopeOrganizationId?: string | null;
+  requesterId: string;
+}) {
+  if (input.scope === ModerationBanScope.GLOBAL_USER) {
+    if (input.subjectUserId !== input.requesterId) {
+      throw new AuthorizationError(403, "Only the banned user can appeal this restriction.");
+    }
+
+    return;
+  }
+
+  if (input.scope === ModerationBanScope.GLOBAL_ORGANIZATION) {
+    if (!input.subjectOrganizationId) {
+      throw new ModerationDomainError(404, "BAN_NOT_FOUND", "Moderation ban not found.");
+    }
+
+    await requireOrganizationManagePermission(
+      input.subjectOrganizationId,
+      "moderation.appeal.create",
+      "ModerationBan",
+      input.banId,
+    );
+
+    return;
+  }
+
+  if (input.subjectUserId === input.requesterId) {
+    return;
+  }
+
+  if (!input.scopeOrganizationId) {
+    throw new ModerationDomainError(404, "BAN_NOT_FOUND", "Moderation ban not found.");
+  }
+
+  await requireOrganizationManagePermission(
+    input.scopeOrganizationId,
+    "moderation.appeal.create",
+    "ModerationBan",
+    input.banId,
+  );
+}
+
+function getBanPriority(scope: ModerationBanScope) {
+  if (scope === ModerationBanScope.GLOBAL_USER) {
+    return 3;
+  }
+
+  if (scope === ModerationBanScope.ORGANIZATION_USER) {
+    return 2;
+  }
+
+  return 1;
+}
+
+export async function findBlockingUserBanForOrganization(
+  organizationId: string,
+  userId: string,
+): Promise<ModerationBanEntry | null> {
+  const bans = await prisma.moderationBan.findMany({
+    where: {
+      status: ModerationBanStatus.ACTIVE,
+      OR: [
+        {
+          scope: ModerationBanScope.GLOBAL_USER,
+          subjectUserId: userId,
+        },
+        {
+          scope: ModerationBanScope.GLOBAL_ORGANIZATION,
+          subjectOrganizationId: organizationId,
+        },
+        {
+          scope: ModerationBanScope.ORGANIZATION_USER,
+          subjectUserId: userId,
+          scopeOrganizationId: organizationId,
+        },
+      ],
+    },
+    include: {
+      subjectOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+      scopeOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
+    take: 20,
+  });
+
+  if (!bans.length) {
+    return null;
+  }
+
+  const prioritized = bans.sort(
+    (left, right) =>
+      getBanPriority(right.scope) - getBanPriority(left.scope) ||
+      right.createdAt.getTime() - left.createdAt.getTime(),
+  );
+
+  return toBanEntry(prioritized[0]!);
+}
+
+export async function findGlobalOrganizationBan(
+  organizationId: string,
+): Promise<ModerationBanEntry | null> {
+  const ban = await prisma.moderationBan.findFirst({
+    where: {
+      status: ModerationBanStatus.ACTIVE,
+      scope: ModerationBanScope.GLOBAL_ORGANIZATION,
+      subjectOrganizationId: organizationId,
+    },
+    include: {
+      subjectOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+      scopeOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
+  });
+
+  return ban ? toBanEntry(ban) : null;
+}
+
+export async function listActiveBansForUser(userId: string): Promise<ModerationBanEntry[]> {
+  const roleBindings = await prisma.roleBinding.findMany({
+    where: {
+      userId,
+      scopeType: ScopeType.ORGANIZATION,
+    },
+    select: {
+      scopeId: true,
+    },
+    distinct: ["scopeId"],
+    take: 10_000,
+  });
+
+  const organizationIds = roleBindings.map((binding) => binding.scopeId);
+
+  const bans = await prisma.moderationBan.findMany({
+    where: {
+      status: ModerationBanStatus.ACTIVE,
+      OR: [
+        {
+          scope: ModerationBanScope.GLOBAL_USER,
+          subjectUserId: userId,
+        },
+        {
+          scope: ModerationBanScope.ORGANIZATION_USER,
+          subjectUserId: userId,
+        },
+        ...(organizationIds.length
+          ? [
+              {
+                scope: ModerationBanScope.GLOBAL_ORGANIZATION,
+                subjectOrganizationId: {
+                  in: organizationIds,
+                },
+              },
+            ]
+          : []),
+      ],
+    },
+    include: {
+      subjectOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+      scopeOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
+    take: 200,
+  });
+
+  return bans.map((ban) => toBanEntry(ban));
+}
+
+export async function listModerationBans(query: ModerationBanListQuery): Promise<PagedModerationBans> {
+  await requirePlatformAdminPermission("moderation.ban.list", "ModerationBan", "platform");
+  const parsedQuery = parseModerationBanListQuery(query);
+
+  const skip = (parsedQuery.page - 1) * parsedQuery.pageSize;
+
+  const where: Prisma.ModerationBanWhereInput = {
+    ...(parsedQuery.scope
+      ? {
+          scope: parsedQuery.scope,
+        }
+      : {}),
+    ...(parsedQuery.status
+      ? {
+          status: parsedQuery.status,
+        }
+      : {}),
+  };
+
+  const [total, bans] = await Promise.all([
+    prisma.moderationBan.count({ where }),
+    prisma.moderationBan.findMany({
+      where,
+      include: {
+        subjectOrganization: {
+          select: {
+            displayName: true,
+          },
+        },
+        scopeOrganization: {
+          select: {
+            displayName: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      skip,
+      take: parsedQuery.pageSize,
+    }),
+  ]);
+
+  return {
+    items: bans.map((ban) => toBanEntry(ban)),
+    total,
+    page: parsedQuery.page,
+    pageSize: parsedQuery.pageSize,
+  };
+}
+
+export async function createModerationBan(input: CreateModerationBanInput) {
+  const parsedInput = parseCreateModerationBanInput(input);
+  const authz = await requireBanCreationPermission({
+    scope: parsedInput.scope,
+    scopeOrganizationId: parsedInput.scopeOrganizationId,
+  });
+
+  if (parsedInput.subjectUserId) {
+    const subjectUser = await prisma.user.findUnique({
+      where: {
+        id: parsedInput.subjectUserId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!subjectUser) {
+      throw new ModerationDomainError(422, "UNPROCESSABLE_MODERATION", "Subject user not found.");
+    }
+  }
+
+  if (parsedInput.subjectOrganizationId) {
+    const subjectOrganization = await prisma.organization.findUnique({
+      where: {
+        id: parsedInput.subjectOrganizationId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!subjectOrganization) {
+      throw new ModerationDomainError(
+        422,
+        "UNPROCESSABLE_MODERATION",
+        "Subject organization not found.",
+      );
+    }
+  }
+
+  if (parsedInput.scopeOrganizationId) {
+    const scopeOrganization = await prisma.organization.findUnique({
+      where: {
+        id: parsedInput.scopeOrganizationId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!scopeOrganization) {
+      throw new ModerationDomainError(
+        422,
+        "UNPROCESSABLE_MODERATION",
+        "Scope organization not found.",
+      );
+    }
+  }
+
+  if (parsedInput.sourceReportId) {
+    const report = await prisma.abuseReport.findUnique({
+      where: {
+        id: parsedInput.sourceReportId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!report) {
+      throw new ModerationDomainError(404, "ABUSE_REPORT_NOT_FOUND", "Abuse report not found.");
+    }
+  }
+
+  if (parsedInput.sourceRiskCaseId) {
+    const riskCase = await prisma.riskCase.findUnique({
+      where: {
+        id: parsedInput.sourceRiskCaseId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!riskCase) {
+      throw new ModerationDomainError(404, "RISK_CASE_NOT_FOUND", "Risk case not found.");
+    }
+  }
+
+  const existing = await prisma.moderationBan.findFirst({
+    where: {
+      scope: parsedInput.scope,
+      status: ModerationBanStatus.ACTIVE,
+      subjectUserId: parsedInput.subjectUserId ?? null,
+      subjectOrganizationId: parsedInput.subjectOrganizationId ?? null,
+      scopeOrganizationId: parsedInput.scopeOrganizationId ?? null,
+    },
+    include: {
+      subjectOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+      scopeOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+    },
+  });
+
+  if (existing) {
+    return {
+      created: false,
+      ban: toBanEntry(existing),
+    };
+  }
+
+  const createdBan = await prisma.moderationBan.create({
+    data: {
+      scope: parsedInput.scope,
+      status: ModerationBanStatus.ACTIVE,
+      reason: parsedInput.reason,
+      subjectUserId: parsedInput.subjectUserId,
+      subjectOrganizationId: parsedInput.subjectOrganizationId,
+      scopeOrganizationId: parsedInput.scopeOrganizationId,
+      sourceReportId: parsedInput.sourceReportId,
+      sourceRiskCaseId: parsedInput.sourceRiskCaseId,
+      metadata: toJsonValue(parsedInput.metadata),
+      createdBy: authz.session.user.id,
+    },
+    include: {
+      subjectOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+      scopeOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+    },
+  });
+
+  const banEntry = toBanEntry(createdBan);
+
+  await writeAuditEvent({
+    actorId: authz.session.user.id,
+    action: "moderation.ban.created",
+    scopeType:
+      createdBan.scope === ModerationBanScope.ORGANIZATION_USER
+        ? ScopeType.ORGANIZATION
+        : ScopeType.PLATFORM,
+    scopeId:
+      createdBan.scope === ModerationBanScope.ORGANIZATION_USER
+        ? createdBan.scopeOrganizationId ?? PLATFORM_SCOPE_ID
+        : PLATFORM_SCOPE_ID,
+    targetType: "ModerationBan",
+    targetId: createdBan.id,
+    reason: createdBan.reason,
+    newValue: {
+      scope: createdBan.scope,
+      subjectUserId: createdBan.subjectUserId,
+      subjectOrganizationId: createdBan.subjectOrganizationId,
+      scopeOrganizationId: createdBan.scopeOrganizationId,
+      sourceReportId: createdBan.sourceReportId,
+      sourceRiskCaseId: createdBan.sourceRiskCaseId,
+    },
+  });
+
+  const recipientUserIds = new Set<string>();
+
+  if (createdBan.subjectUserId) {
+    recipientUserIds.add(createdBan.subjectUserId);
+  }
+
+  if (createdBan.scope === ModerationBanScope.GLOBAL_ORGANIZATION && createdBan.subjectOrganizationId) {
+    const managers = await getOrganizationManagerUserIds(createdBan.subjectOrganizationId);
+    for (const managerId of managers) {
+      recipientUserIds.add(managerId);
+    }
+  }
+
+  if (recipientUserIds.size > 0) {
+    void enqueueSystemNotification({
+      orgId: createdBan.scopeOrganizationId ?? createdBan.subjectOrganizationId ?? undefined,
+      userIds: Array.from(recipientUserIds),
+      type: NotificationType.USER_RESTRICTED,
+      subject: "Moderation restriction applied",
+      content: buildBanMessageForNotification(banEntry),
+      idempotencyKeyBase: `txn:moderation-ban:${createdBan.id}`,
+      metadata: {
+        banId: createdBan.id,
+        scope: createdBan.scope,
+        reason: createdBan.reason,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue moderation ban notification", {
+        banId: createdBan.id,
+        error: error instanceof Error ? error.message : "unknown",
+      });
+    });
+  }
+
+  return {
+    created: true,
+    ban: banEntry,
+  };
+}
+
+export async function createModerationAppeal(input: CreateModerationAppealInput) {
+  const parsedInput = parseCreateModerationAppealInput(input);
+  const session = await getServerSessionOrNull();
+
+  if (!session) {
+    throw new AuthorizationError(401, "Authentication is required.");
+  }
+
+  const ban = await prisma.moderationBan.findUnique({
+    where: {
+      id: parsedInput.banId,
+    },
+    include: {
+      subjectOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+      scopeOrganization: {
+        select: {
+          displayName: true,
+        },
+      },
+    },
+  });
+
+  if (!ban) {
+    throw new ModerationDomainError(404, "BAN_NOT_FOUND", "Moderation ban not found.");
+  }
+
+  if (ban.status !== ModerationBanStatus.ACTIVE) {
+    throw new ModerationDomainError(409, "BAN_ALREADY_LIFTED", "This ban is no longer active.");
+  }
+
+  await assertAppealRequesterPermission({
+    banId: ban.id,
+    scope: ban.scope,
+    subjectUserId: ban.subjectUserId,
+    subjectOrganizationId: ban.subjectOrganizationId,
+    scopeOrganizationId: ban.scopeOrganizationId,
+    requesterId: session.user.id,
+  });
+
+  const appeal = await prisma.moderationAppeal.create({
+    data: {
+      banId: ban.id,
+      requesterId: session.user.id,
+      status: ModerationAppealStatus.OPEN,
+      message: parsedInput.message,
+      metadata: toJsonValue(parsedInput.metadata),
+    },
+    include: {
+      requester: {
+        select: {
+          name: true,
+          email: true,
+        },
+      },
+      reviewer: {
+        select: {
+          name: true,
+        },
+      },
+      ban: {
+        include: {
+          subjectOrganization: {
+            select: {
+              displayName: true,
+            },
+          },
+          scopeOrganization: {
+            select: {
+              displayName: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  await writeAuditEvent({
+    actorId: session.user.id,
+    action: "moderation.appeal.created",
+    scopeType:
+      ban.scope === ModerationBanScope.ORGANIZATION_USER
+        ? ScopeType.ORGANIZATION
+        : ScopeType.PLATFORM,
+    scopeId:
+      ban.scope === ModerationBanScope.ORGANIZATION_USER
+        ? ban.scopeOrganizationId ?? PLATFORM_SCOPE_ID
+        : PLATFORM_SCOPE_ID,
+    targetType: "ModerationAppeal",
+    targetId: appeal.id,
+    newValue: {
+      banId: ban.id,
+      scope: ban.scope,
+      requesterId: session.user.id,
+    },
+  });
+
+  const reviewerIds = new Set<string>();
+
+  if (ban.scope === ModerationBanScope.ORGANIZATION_USER && ban.scopeOrganizationId) {
+    const managers = await getOrganizationManagerUserIds(ban.scopeOrganizationId);
+    for (const managerId of managers) {
+      if (managerId !== session.user.id) {
+        reviewerIds.add(managerId);
+      }
+    }
+  } else {
+    const admins = await getPlatformAdminUserIds();
+    for (const adminId of admins) {
+      if (adminId !== session.user.id) {
+        reviewerIds.add(adminId);
+      }
+    }
+  }
+
+  if (reviewerIds.size > 0) {
+    void enqueueSystemNotification({
+      orgId: ban.scopeOrganizationId ?? ban.subjectOrganizationId ?? undefined,
+      userIds: Array.from(reviewerIds),
+      type: NotificationType.USER_RESTRICTED,
+      subject: "New moderation appeal submitted",
+      content: "A moderation appeal requires review.",
+      idempotencyKeyBase: `txn:moderation-appeal:${appeal.id}`,
+      metadata: {
+        appealId: appeal.id,
+        banId: ban.id,
+        scope: ban.scope,
+      },
+      maxAttempts: 6,
+    }).catch((error) => {
+      console.warn("Failed to enqueue moderation appeal notification", {
+        appealId: appeal.id,
+        error: error instanceof Error ? error.message : "unknown",
+      });
+    });
+  }
+
+  return toAppealEntry(appeal);
+}
+
+export async function listModerationAppeals(
+  query: ModerationAppealListQuery,
+): Promise<PagedModerationAppeals> {
+  await requirePlatformAdminPermission("moderation.appeal.list", "ModerationAppeal", "platform");
+  const parsedQuery = parseModerationAppealListQuery(query);
+  const skip = (parsedQuery.page - 1) * parsedQuery.pageSize;
+
+  const where: Prisma.ModerationAppealWhereInput = {
+    ...(parsedQuery.status
+      ? {
+          status: parsedQuery.status,
+        }
+      : {}),
+  };
+
+  const [total, appeals] = await Promise.all([
+    prisma.moderationAppeal.count({ where }),
+    prisma.moderationAppeal.findMany({
+      where,
+      include: {
+        requester: {
+          select: {
+            name: true,
+            email: true,
+          },
+        },
+        reviewer: {
+          select: {
+            name: true,
+          },
+        },
+        ban: {
+          include: {
+            subjectOrganization: {
+              select: {
+                displayName: true,
+              },
+            },
+            scopeOrganization: {
+              select: {
+                displayName: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      skip,
+      take: parsedQuery.pageSize,
+    }),
+  ]);
+
+  return {
+    items: appeals.map((appeal) => toAppealEntry(appeal)),
+    total,
+    page: parsedQuery.page,
+    pageSize: parsedQuery.pageSize,
+  };
+}
+
+export async function reviewModerationAppeal(
+  appealId: string,
+  input: ReviewModerationAppealInput,
+) {
+  const parsedInput = parseReviewModerationAppealInput(input);
+
+  const existingAppeal = await prisma.moderationAppeal.findUnique({
+    where: {
+      id: appealId,
+    },
+    include: {
+      requester: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      },
+      reviewer: {
+        select: {
+          name: true,
+        },
+      },
+      ban: {
+        include: {
+          subjectOrganization: {
+            select: {
+              displayName: true,
+            },
+          },
+          scopeOrganization: {
+            select: {
+              displayName: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!existingAppeal) {
+    throw new ModerationDomainError(404, "APPEAL_NOT_FOUND", "Moderation appeal not found.");
+  }
+
+  const reviewerAuthz = await requireAppealReviewPermission({
+    appealId,
+    banScope: existingAppeal.ban.scope,
+    scopeOrganizationId: existingAppeal.ban.scopeOrganizationId,
+  });
+
+  if (existingAppeal.status !== ModerationAppealStatus.OPEN && !reviewerAuthz.isPlatformAdmin) {
+    throw new ModerationDomainError(
+      409,
+      "APPEAL_ALREADY_REVIEWED",
+      "This appeal has already been reviewed.",
+    );
+  }
+
+  const updatedAppeal = await prisma.$transaction(async (tx) => {
+    if (
+      parsedInput.decision === ModerationAppealStatus.APPROVED &&
+      existingAppeal.ban.status === ModerationBanStatus.ACTIVE
+    ) {
+      await tx.moderationBan.update({
+        where: {
+          id: existingAppeal.ban.id,
+        },
+        data: {
+          status: ModerationBanStatus.LIFTED,
+          liftedBy: reviewerAuthz.session.user.id,
+          liftedAt: now(),
+        },
+      });
+    }
+
+    return tx.moderationAppeal.update({
+      where: {
+        id: appealId,
+      },
+      data: {
+        status: parsedInput.decision,
+        reviewerNote: parsedInput.note,
+        reviewedBy: reviewerAuthz.session.user.id,
+        reviewedAt: now(),
+      },
+      include: {
+        requester: {
+          select: {
+            name: true,
+            email: true,
+          },
+        },
+        reviewer: {
+          select: {
+            name: true,
+          },
+        },
+        ban: {
+          include: {
+            subjectOrganization: {
+              select: {
+                displayName: true,
+              },
+            },
+            scopeOrganization: {
+              select: {
+                displayName: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  await writeAuditEvent({
+    actorId: reviewerAuthz.session.user.id,
+    action: "moderation.appeal.reviewed",
+    scopeType:
+      updatedAppeal.ban.scope === ModerationBanScope.ORGANIZATION_USER
+        ? ScopeType.ORGANIZATION
+        : ScopeType.PLATFORM,
+    scopeId:
+      updatedAppeal.ban.scope === ModerationBanScope.ORGANIZATION_USER
+        ? updatedAppeal.ban.scopeOrganizationId ?? PLATFORM_SCOPE_ID
+        : PLATFORM_SCOPE_ID,
+    targetType: "ModerationAppeal",
+    targetId: updatedAppeal.id,
+    reason: parsedInput.note,
+    oldValue: {
+      status: existingAppeal.status,
+    },
+    newValue: {
+      status: updatedAppeal.status,
+      decision: parsedInput.decision,
+      banStatus:
+        parsedInput.decision === ModerationAppealStatus.APPROVED
+          ? ModerationBanStatus.LIFTED
+          : existingAppeal.ban.status,
+    },
+  });
+
+  const recipientUserIds = new Set<string>([existingAppeal.requester.id]);
+  if (updatedAppeal.ban.subjectUserId) {
+    recipientUserIds.add(updatedAppeal.ban.subjectUserId);
+  }
+
+  void enqueueSystemNotification({
+    orgId: updatedAppeal.ban.scopeOrganizationId ?? updatedAppeal.ban.subjectOrganizationId ?? undefined,
+    userIds: Array.from(recipientUserIds),
+    type: NotificationType.USER_RESTRICTED,
+    subject: `Moderation appeal ${parsedInput.decision.toLowerCase()}`,
+    content:
+      parsedInput.decision === ModerationAppealStatus.APPROVED
+        ? "Your moderation appeal was approved and the restriction has been lifted."
+        : "Your moderation appeal was reviewed and remains restricted.",
+    idempotencyKeyBase: `txn:moderation-appeal-review:${updatedAppeal.id}:${parsedInput.decision}`,
+    metadata: {
+      appealId: updatedAppeal.id,
+      banId: updatedAppeal.ban.id,
+      decision: parsedInput.decision,
+      reviewerNote: parsedInput.note,
+    },
+    maxAttempts: 6,
+  }).catch((error) => {
+    console.warn("Failed to enqueue moderation appeal review notification", {
+      appealId: updatedAppeal.id,
+      error: error instanceof Error ? error.message : "unknown",
+    });
+  });
+
+  return toAppealEntry(updatedAppeal);
 }

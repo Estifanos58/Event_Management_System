@@ -146,7 +146,25 @@ enum CheckInStatus {
 enum AbuseTargetType {
   EVENT
   ORGANIZER
+  USER
   PLATFORM
+}
+
+enum ModerationBanScope {
+  GLOBAL_USER
+  GLOBAL_ORGANIZATION
+  ORGANIZATION_USER
+}
+
+enum ModerationBanStatus {
+  ACTIVE
+  LIFTED
+}
+
+enum ModerationAppealStatus {
+  OPEN
+  APPROVED
+  REJECTED
 }
 
 enum AbuseReportStatus {
@@ -319,6 +337,11 @@ model User {
   createdNotificationDeliveries NotificationDelivery[] @relation("NotificationDeliveryCreator")
   policyAcceptances PolicyAcceptance[]
   dataDeletionRequests DataDeletionRequest[]
+  subjectModerationBans ModerationBan[] @relation("ModerationBanSubjectUser")
+  createdModerationBans ModerationBan[] @relation("ModerationBanCreator")
+  liftedModerationBans ModerationBan[] @relation("ModerationBanLifter")
+  submittedModerationAppeals ModerationAppeal[] @relation("ModerationAppealRequester")
+  reviewedModerationAppeals ModerationAppeal[] @relation("ModerationAppealReviewer")
 }
 
 model Session {
@@ -392,6 +415,8 @@ model Organization {
   webhookOutboxEvents WebhookOutboxEvent[]
   inboundProviderEvents InboundProviderEvent[]
   notificationDeliveries NotificationDelivery[]
+  subjectModerationBans ModerationBan[] @relation("ModerationBanSubjectOrganization")
+  scopedModerationBans ModerationBan[] @relation("ModerationBanScopeOrganization")
 }
 
 model RoleBinding {
@@ -827,6 +852,7 @@ model AbuseReport {
   reporter     User          @relation("ReporterAbuseReports", fields: [reporterId], references: [id], onDelete: Restrict)
   event        Event?        @relation("EventAbuseReports", fields: [eventId], references: [id], onDelete: SetNull)
   organization Organization? @relation("OrganizationAbuseReports", fields: [organizationId], references: [id], onDelete: SetNull)
+  linkedBans   ModerationBan[] @relation("ModerationBanSourceReport")
 
   @@index([targetType, targetId, status])
   @@index([reporterId, createdAt])
@@ -847,9 +873,63 @@ model RiskCase {
   event        Event?        @relation("EventRiskCases", fields: [eventId], references: [id], onDelete: SetNull)
   organization Organization? @relation("OrganizationRiskCases", fields: [organizationId], references: [id], onDelete: SetNull)
   creator      User?         @relation("RiskCaseCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  linkedBans   ModerationBan[] @relation("ModerationBanSourceRiskCase")
 
   @@index([scopeType, scopeId, status])
   @@index([severity, status])
+}
+
+model ModerationBan {
+  id                    String              @id @default(cuid())
+  scope                 ModerationBanScope
+  status                ModerationBanStatus @default(ACTIVE)
+  reason                String
+  subjectUserId         String?
+  subjectOrganizationId String?
+  scopeOrganizationId   String?
+  sourceReportId        String?
+  sourceRiskCaseId      String?
+  metadata              Json?
+  createdBy             String
+  liftedBy              String?
+  liftedAt              DateTime?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  subjectUser         User?          @relation("ModerationBanSubjectUser", fields: [subjectUserId], references: [id], onDelete: SetNull)
+  subjectOrganization Organization?  @relation("ModerationBanSubjectOrganization", fields: [subjectOrganizationId], references: [id], onDelete: SetNull)
+  scopeOrganization   Organization?  @relation("ModerationBanScopeOrganization", fields: [scopeOrganizationId], references: [id], onDelete: SetNull)
+  sourceReport        AbuseReport?   @relation("ModerationBanSourceReport", fields: [sourceReportId], references: [id], onDelete: SetNull)
+  sourceRiskCase      RiskCase?      @relation("ModerationBanSourceRiskCase", fields: [sourceRiskCaseId], references: [id], onDelete: SetNull)
+  creator             User           @relation("ModerationBanCreator", fields: [createdBy], references: [id], onDelete: Restrict)
+  lifter              User?          @relation("ModerationBanLifter", fields: [liftedBy], references: [id], onDelete: SetNull)
+  appeals             ModerationAppeal[]
+
+  @@index([scope, status, createdAt])
+  @@index([subjectUserId, status])
+  @@index([subjectOrganizationId, status])
+  @@index([scopeOrganizationId, status])
+}
+
+model ModerationAppeal {
+  id             String                @id @default(cuid())
+  banId          String
+  requesterId    String
+  status         ModerationAppealStatus @default(OPEN)
+  message        String
+  reviewerNote   String?
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  metadata       Json?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  ban       ModerationBan @relation(fields: [banId], references: [id], onDelete: Cascade)
+  requester User          @relation("ModerationAppealRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  reviewer  User?         @relation("ModerationAppealReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+
+  @@index([banId, status, createdAt])
+  @@index([requesterId, status, createdAt])
 }
 
 model Settlement {

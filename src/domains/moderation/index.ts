@@ -14,6 +14,14 @@ export {
   getModerationQueue,
   applyModerationEnforcement,
   getEventTrustSignals,
+  createModerationBan,
+  listModerationBans,
+  createModerationAppeal,
+  listModerationAppeals,
+  reviewModerationAppeal,
+  listActiveBansForUser,
+  findBlockingUserBanForOrganization,
+  findGlobalOrganizationBan,
 } from "@/domains/moderation/service";
 
 export {
@@ -34,4 +42,13 @@ export type {
   ModerationQueueItem,
   ModerationQueueSnapshot,
   EventTrustSignals,
+  CreateModerationBanInput,
+  ModerationBanListQuery,
+  ModerationBanEntry,
+  PagedModerationBans,
+  CreateModerationAppealInput,
+  ModerationAppealListQuery,
+  ReviewModerationAppealInput,
+  ModerationAppealEntry,
+  PagedModerationAppeals,
 } from "@/domains/moderation/types";
