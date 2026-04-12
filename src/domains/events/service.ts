@@ -50,6 +50,10 @@ import {
 } from "@/domains/identity/guards";
 import { canAccess, getPermissions } from "@/domains/identity/permissions";
 import { ROLE_DEFAULT_PERMISSIONS } from "@/domains/identity/types";
+import {
+  findBlockingUserBanForOrganization,
+  findGlobalOrganizationBan,
+} from "@/domains/moderation/service";
 import { enqueueSystemNotification } from "@/domains/notifications/service";
 
 const draftPayloadSchema = z.object({
@@ -1419,6 +1423,27 @@ export async function transitionEventStatus(
 
   if (transition.nextStatus === EventStatus.PUBLISHED) {
     await assertReadyForPublish(event);
+
+    const blockingUserBan = await findBlockingUserBanForOrganization(
+      event.orgId,
+      session.user.id,
+    );
+    if (blockingUserBan) {
+      throw new EventDomainError(
+        403,
+        "INVALID_TRANSITION",
+        "Your account is currently restricted from publishing events for this organization.",
+      );
+    }
+
+    const organizationBan = await findGlobalOrganizationBan(event.orgId);
+    if (organizationBan) {
+      throw new EventDomainError(
+        403,
+        "INVALID_TRANSITION",
+        "Your organization is currently restricted from publishing events.",
+      );
+    }
   }
 
   if (requiresVerifiedOrganization(transition.nextStatus)) {
