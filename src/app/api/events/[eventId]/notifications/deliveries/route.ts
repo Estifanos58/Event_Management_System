@@ -9,16 +9,18 @@ export async function GET(
     const { eventId } = await params;
     const url = new URL(request.url);
 
-    const deliveries = await listEventNotificationDeliveries(eventId, {
+    const result = await listEventNotificationDeliveries(eventId, {
       type: url.searchParams.get("type") ?? undefined,
       channel: url.searchParams.get("channel") ?? undefined,
       status: url.searchParams.get("status") ?? undefined,
       userId: url.searchParams.get("userId") ?? undefined,
       take: url.searchParams.get("take") ?? undefined,
+      page: url.searchParams.get("page") ?? undefined,
+      pageSize: url.searchParams.get("pageSize") ?? undefined,
     });
 
     return Response.json({
-      deliveries,
+      result,
     });
   } catch (error) {
     return toNotificationErrorResponse(error);

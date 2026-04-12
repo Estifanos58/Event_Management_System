@@ -15,6 +15,7 @@ import { writeAuditEvent } from "@/core/audit/audit";
 import { getServerSessionOrNull } from "@/core/auth/session";
 import { prisma } from "@/core/db/prisma";
 import { env } from "@/core/env";
+import { logError } from "@/core/observability/logger";
 import { dispatchNotificationChannel } from "@/domains/notifications/adapters";
 import { NotificationDomainError } from "@/domains/notifications/errors";
 import type {
@@ -25,6 +26,7 @@ import type {
   ListMyNotificationsQuery,
   NotificationAudienceType,
   NotificationDeliveryListItem,
+  PagedNotificationDeliveryList,
   NotificationPreferencesSnapshot,
   NotificationsMaintenanceResult,
   SendOrganizerAnnouncementInput,
@@ -150,6 +152,8 @@ const listEventNotificationDeliveriesQuerySchema = z.object({
   status: z.enum(NotificationDeliveryStatus).optional(),
   userId: z.string().trim().max(120).optional(),
   take: z.coerce.number().int().min(1).max(200).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(200).optional(),
 });
 
 const listMyNotificationsQuerySchema = z.object({
@@ -184,6 +188,22 @@ function getRetryDelayMs(attemptCount: number) {
   const exponent = Math.max(0, attemptCount - 1);
   const delaySeconds = Math.min(3_600, baseSeconds * 2 ** exponent);
   return delaySeconds * 1_000;
+}
+
+function getDispatchProviderFallback(channel: NotificationChannel) {
+  if (channel === NotificationChannel.EMAIL) {
+    return "GMAIL_SMTP";
+  }
+
+  if (channel === NotificationChannel.SMS) {
+    return "INTERNAL_SMS";
+  }
+
+  if (channel === NotificationChannel.PUSH) {
+    return "INTERNAL_PUSH";
+  }
+
+  return "INTERNAL_IN_APP";
 }
 
 function toNotificationPreferencesSnapshot(input: {
@@ -317,12 +337,16 @@ function parseSendOrganizerAnnouncementInput(input: SendOrganizerAnnouncementInp
 function parseListEventNotificationDeliveriesQuery(input: ListEventNotificationDeliveriesQuery) {
   const parsed = listEventNotificationDeliveriesQuerySchema.parse(input);
 
+  const resolvedPageSize = parsed.pageSize ?? parsed.take ?? 100;
+  const resolvedPage = parsed.page ?? 1;
+
   return {
     type: parsed.type,
     channel: parsed.channel,
     status: parsed.status,
     userId: normalizeOptionalText(parsed.userId),
-    take: parsed.take ?? 100,
+    page: resolvedPage,
+    pageSize: resolvedPageSize,
   };
 }
 
@@ -836,14 +860,34 @@ async function processNotificationDelivery(delivery: {
     return "cancelled" as const;
   }
 
-  const dispatchResult = await dispatchNotificationChannel(delivery.channel, {
-    type: delivery.type,
-    subject: delivery.subject ?? undefined,
-    content: delivery.content,
-    metadata: delivery.metadata,
-    recipientAddress: delivery.recipientAddress ?? undefined,
-    user: delivery.recipient,
-  });
+  let dispatchResult: Awaited<ReturnType<typeof dispatchNotificationChannel>>;
+
+  try {
+    dispatchResult = await dispatchNotificationChannel(delivery.channel, {
+      type: delivery.type,
+      subject: delivery.subject ?? undefined,
+      content: delivery.content,
+      metadata: delivery.metadata,
+      recipientAddress: delivery.recipientAddress ?? undefined,
+      user: delivery.recipient,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown";
+
+    logError("notifications.delivery.dispatch_failed", {
+      deliveryId: delivery.id,
+      channel: delivery.channel,
+      type: delivery.type,
+      message,
+    });
+
+    dispatchResult = {
+      success: false,
+      provider: getDispatchProviderFallback(delivery.channel),
+      responseCode: "DELIVERY_DISPATCH_EXCEPTION",
+      responseMessage: message,
+    };
+  }
 
   if (dispatchResult.success) {
     await prisma.$transaction(async (tx) => {
@@ -1212,45 +1256,60 @@ export async function sendOrganizerAnnouncement(
 export async function listEventNotificationDeliveries(
   eventId: string,
   query: ListEventNotificationDeliveriesQuery,
-) {
+): Promise<PagedNotificationDeliveryList> {
   const parsedQuery = parseListEventNotificationDeliveriesQuery(query);
   await requireNotificationReadPermission(eventId, "notifications.delivery.list");
   await loadEventNotificationContext(eventId);
 
-  const deliveries = await prisma.notificationDelivery.findMany({
-    where: {
-      eventId,
-      type: parsedQuery.type,
-      channel: parsedQuery.channel,
-      status: parsedQuery.status,
-      userId: parsedQuery.userId,
-    },
-    orderBy: {
-      createdAt: "desc",
-    },
-    take: parsedQuery.take,
-    select: {
-      id: true,
-      type: true,
-      channel: true,
-      status: true,
-      subject: true,
-      content: true,
-      recipientAddress: true,
-      scheduledFor: true,
-      nextAttemptAt: true,
-      attemptCount: true,
-      maxAttempts: true,
-      failureReason: true,
-      sentAt: true,
-      failedAt: true,
-      eventId: true,
-      userId: true,
-      createdAt: true,
-    },
-  });
+  const skip = (parsedQuery.page - 1) * parsedQuery.pageSize;
 
-  return deliveries.map((delivery) => toNotificationDeliveryListItem(delivery));
+  const whereClause = {
+    eventId,
+    type: parsedQuery.type,
+    channel: parsedQuery.channel,
+    status: parsedQuery.status,
+    userId: parsedQuery.userId,
+  };
+
+  const [total, deliveries] = await Promise.all([
+    prisma.notificationDelivery.count({
+      where: whereClause,
+    }),
+    prisma.notificationDelivery.findMany({
+      where: whereClause,
+      orderBy: {
+        createdAt: "desc",
+      },
+      skip,
+      take: parsedQuery.pageSize,
+      select: {
+        id: true,
+        type: true,
+        channel: true,
+        status: true,
+        subject: true,
+        content: true,
+        recipientAddress: true,
+        scheduledFor: true,
+        nextAttemptAt: true,
+        attemptCount: true,
+        maxAttempts: true,
+        failureReason: true,
+        sentAt: true,
+        failedAt: true,
+        eventId: true,
+        userId: true,
+        createdAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    items: deliveries.map((delivery) => toNotificationDeliveryListItem(delivery)),
+    total,
+    page: parsedQuery.page,
+    pageSize: parsedQuery.pageSize,
+  };
 }
 
 export async function enqueueOrderConfirmationNotification(orderId: string) {
@@ -1386,27 +1445,38 @@ export async function runNotificationsMaintenance(
   });
 
   for (const delivery of dueDeliveries) {
-    const outcome = await processNotificationDelivery(delivery);
-    result.processed += 1;
+    try {
+      const outcome = await processNotificationDelivery(delivery);
+      result.processed += 1;
 
-    if (outcome === "sent") {
-      result.sent += 1;
-      continue;
-    }
+      if (outcome === "sent") {
+        result.sent += 1;
+        continue;
+      }
 
-    if (outcome === "retried") {
-      result.retried += 1;
+      if (outcome === "retried") {
+        result.retried += 1;
+        result.failed += 1;
+        continue;
+      }
+
+      if (outcome === "dead_lettered") {
+        result.deadLettered += 1;
+        result.failed += 1;
+        continue;
+      }
+
+      result.cancelled += 1;
+    } catch (error) {
       result.failed += 1;
-      continue;
-    }
 
-    if (outcome === "dead_lettered") {
-      result.deadLettered += 1;
-      result.failed += 1;
-      continue;
+      logError("notifications.delivery.process_failed", {
+        deliveryId: delivery.id,
+        channel: delivery.channel,
+        type: delivery.type,
+        message: error instanceof Error ? error.message : "unknown",
+      });
     }
-
-    result.cancelled += 1;
   }
 
   return result;

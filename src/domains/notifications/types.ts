@@ -63,6 +63,8 @@ export type ListEventNotificationDeliveriesQuery = {
   status?: unknown;
   userId?: unknown;
   take?: unknown;
+  page?: unknown;
+  pageSize?: unknown;
 };
 
 export type ListMyNotificationsQuery = {
@@ -89,6 +91,13 @@ export type NotificationDeliveryListItem = {
   eventId?: string;
   userId: string;
   createdAt: string;
+};
+
+export type PagedNotificationDeliveryList = {
+  items: NotificationDeliveryListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
 };
 
 export type NotificationsMaintenanceResult = {
